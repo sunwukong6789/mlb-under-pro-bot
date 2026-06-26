@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-MLB Edge AI Pro v18
-- Pregame Under/Over/PASS evaluation
-- Live Bet Under Engine
-- Live Under alert conditions
-- Sharp Money, RLM, Steam, CLV projection
-- API health panel + fallback sample games
-- Clean ASCII UI, UTF-8 safe
+MLB Edge AI Pro v19 Ultimate SunWukong
+Final version:
+- Pregame UNDER / OVER / PASS
+- Live UNDER / LIVE OVER / PASS
+- Sharp Money, Reverse Line Movement, Steam Move, CLV projection
+- Live Pace Engine, Base Risk Engine, Pitch Count placeholder, Bullpen fatigue placeholder
+- Clean dashboard UI, API status, Telegram alerts
+- Fallback sample games when MLB API fails
+- UTF-8 safe, no broken emoji characters
 
-Render start command: python app.py
+Render start command:
+python app.py
 """
 
 import os
@@ -21,12 +24,15 @@ import requests
 from flask import Flask, jsonify, render_template_string, redirect, url_for, Response
 
 
+# =========================
+# SETTINGS
+# =========================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 CHECK_EVERY_SECONDS = int(os.getenv("CHECK_EVERY_SECONDS", "120"))
+LIVE_ALERT_SCORE = int(os.getenv("LIVE_ALERT_SCORE", "88"))
 PREGAME_ALERT_SCORE = int(os.getenv("PREGAME_ALERT_SCORE", "86"))
-LIVE_UNDER_ALERT_SCORE = int(os.getenv("LIVE_UNDER_ALERT_SCORE", "88"))
 MIN_EDGE_DIFF = int(os.getenv("MIN_EDGE_DIFF", "8"))
 MIN_DISPLAY_SCORE = int(os.getenv("MIN_DISPLAY_SCORE", "50"))
 PREGAME_WINDOW_HOURS = int(os.getenv("PREGAME_WINDOW_HOURS", "24"))
@@ -48,6 +54,11 @@ latest_games: List[Dict[str, Any]] = []
 last_update = "Not updated"
 last_error = ""
 last_refresh_ok = False
+alerted: Set[str] = set()
+bot_running = False
+bot_thread = None
+line_history: Dict[str, List[Dict[str, Any]]] = {}
+
 api_status = {
     "mlb": "UNKNOWN",
     "odds": "SIMULATED",
@@ -55,18 +66,17 @@ api_status = {
     "telegram": "UNKNOWN",
     "games_loaded": 0,
 }
-alerted: Set[str] = set()
-bot_running = False
-bot_thread = None
-line_history: Dict[str, List[Dict[str, Any]]] = {}
 
 
+# =========================
+# MODEL WEIGHTS
+# =========================
 PITCHER_UNDER_EDGE = {
     "Paul Skenes": 12, "Tarik Skubal": 12, "Zack Wheeler": 11, "Logan Gilbert": 10,
     "George Kirby": 10, "Chris Sale": 9, "Corbin Burnes": 10, "Garrett Crochet": 9,
     "Cole Ragans": 8, "Max Fried": 8, "Sonny Gray": 7, "Framber Valdez": 8,
-    "Cristopher Sanchez": 8, "Luis Castillo": 7, "Joe Ryan": 7,
-    "Andrew Abbott": 7, "Nathan Eovaldi": 7, "Kevin Gausman": 7,
+    "Cristopher Sanchez": 8, "Luis Castillo": 7, "Joe Ryan": 7, "Andrew Abbott": 7,
+    "Nathan Eovaldi": 7, "Kevin Gausman": 7, "Logan Webb": 8, "Yoshinobu Yamamoto": 9,
 }
 
 PARK_UNDER_EDGE = {
@@ -78,10 +88,13 @@ PARK_UNDER_EDGE = {
 PARK_OVER_EDGE = {
     "Colorado Rockies": 10, "Cincinnati Reds": 5, "Boston Red Sox": 4,
     "Philadelphia Phillies": 3, "New York Yankees": 3, "Texas Rangers": 2,
-    "Toronto Blue Jays": 2,
+    "Toronto Blue Jays": 2, "Arizona Diamondbacks": 2,
 }
 
 
+# =========================
+# HELPERS
+# =========================
 def today() -> str:
     return dt.datetime.now().strftime("%Y-%m-%d")
 
@@ -128,6 +141,7 @@ def short_team(name: str) -> str:
         "WHITE": "CWS", "SOX": "SOX", "BLUE": "JAY", "METS": "NYM",
         "DIAMONDBACKS": "ARI", "CARDINALS": "STL", "BREWERS": "MIL",
         "CUBS": "CHC", "ROYALS": "KC", "TWINS": "MIN", "BRAVES": "ATL",
+        "MARLINS": "MIA", "ATHLETICS": "ATH",
     }
     return fixes.get(word, word[:3])
 
@@ -162,11 +176,14 @@ def runner_label(runners: List[str]) -> str:
     return ", ".join(mapping.get(r, r) for r in runners)
 
 
+def clamp(v, lo=0, hi=100):
+    return max(lo, min(hi, v))
+
+
 def send_telegram(text: str) -> bool:
     global api_status
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         api_status["telegram"] = "MISSING"
-        print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
         return False
     try:
         r = requests.post(
@@ -176,12 +193,14 @@ def send_telegram(text: str) -> bool:
         )
         api_status["telegram"] = "CONNECTED" if r.ok else "ERROR"
         return r.ok
-    except Exception as e:
+    except Exception:
         api_status["telegram"] = "ERROR"
-        print("Telegram error:", repr(e))
         return False
 
 
+# =========================
+# MLB API + FALLBACK
+# =========================
 def fetch_mlb_games() -> List[Dict[str, Any]]:
     global api_status
     r = requests.get(
@@ -198,44 +217,45 @@ def fetch_mlb_games() -> List[Dict[str, Any]]:
     return games
 
 
-def sample_game(pk: int, away_name: str, home_name: str, away_pitcher: str, home_pitcher: str, hour_offset: int, live=False, inning=0, outs=0, away_score=0, home_score=0):
+def sample_game(pk, away, home, ap, hp, hour_offset, live=False, inning=0, outs=0, away_score=0, home_score=0, runners=None):
+    runners = runners or []
     game_time = now_utc() + dt.timedelta(hours=hour_offset)
-    status = "In Progress" if live else "Scheduled"
-    linescore = {}
-    if live:
-        linescore = {
-            "currentInning": inning,
-            "inningHalf": "Top" if inning % 2 else "Bottom",
-            "outs": outs,
-            "offense": {},
-        }
+    offense = {}
+    for r in runners:
+        offense[r] = {"id": 1}
     return {
         "gamePk": pk,
         "gameDate": game_time.isoformat().replace("+00:00", "Z"),
-        "status": {"detailedState": status},
+        "status": {"detailedState": "In Progress" if live else "Scheduled"},
         "teams": {
-            "away": {"score": away_score, "team": {"name": away_name}, "probablePitcher": {"fullName": away_pitcher}},
-            "home": {"score": home_score, "team": {"name": home_name}, "probablePitcher": {"fullName": home_pitcher}},
+            "away": {"score": away_score, "team": {"name": away}, "probablePitcher": {"fullName": ap}},
+            "home": {"score": home_score, "team": {"name": home}, "probablePitcher": {"fullName": hp}},
         },
-        "linescore": linescore,
+        "linescore": {
+            "currentInning": inning,
+            "inningHalf": "Top" if inning % 2 else "Bottom",
+            "outs": outs,
+            "offense": offense,
+        } if live else {},
     }
 
 
 def fallback_games() -> List[Dict[str, Any]]:
     return [
-        sample_game(900101, "Cincinnati Reds", "Pittsburgh Pirates", "Andrew Abbott", "Paul Skenes", 2),
-        sample_game(900102, "Houston Astros", "Detroit Tigers", "Spencer Arrighetti", "Tarik Skubal", 2),
-        sample_game(900103, "Seattle Mariners", "Cleveland Guardians", "Logan Gilbert", "Tanner Bibee", 3),
-        sample_game(900104, "Texas Rangers", "Toronto Blue Jays", "Nathan Eovaldi", "Kevin Gausman", 3),
-        sample_game(900105, "Colorado Rockies", "New York Yankees", "TBD", "TBD", 4),
-        sample_game(900106, "Boston Red Sox", "Philadelphia Phillies", "TBD", "TBD", 4),
-        sample_game(900107, "San Diego Padres", "San Francisco Giants", "Yu Darvish", "Logan Webb", -1, live=True, inning=6, outs=2, away_score=1, home_score=2),
-        sample_game(900108, "Miami Marlins", "New York Mets", "TBD", "TBD", -1, live=True, inning=5, outs=1, away_score=0, home_score=1),
+        sample_game(910001, "Cincinnati Reds", "Pittsburgh Pirates", "Andrew Abbott", "Paul Skenes", 2),
+        sample_game(910002, "Houston Astros", "Detroit Tigers", "Spencer Arrighetti", "Tarik Skubal", 2),
+        sample_game(910003, "Seattle Mariners", "Cleveland Guardians", "Logan Gilbert", "Tanner Bibee", 3),
+        sample_game(910004, "Texas Rangers", "Toronto Blue Jays", "Nathan Eovaldi", "Kevin Gausman", 3),
+        sample_game(910005, "Colorado Rockies", "New York Yankees", "TBD", "TBD", 4),
+        sample_game(910006, "Boston Red Sox", "Philadelphia Phillies", "TBD", "TBD", 4),
+        sample_game(910007, "San Diego Padres", "San Francisco Giants", "Yu Darvish", "Logan Webb", -1, True, 6, 2, 1, 2),
+        sample_game(910008, "Miami Marlins", "New York Mets", "TBD", "TBD", -1, True, 5, 1, 0, 1),
+        sample_game(910009, "Arizona Diamondbacks", "Tampa Bay Rays", "TBD", "TBD", -1, True, 4, 0, 4, 3, ["first", "second"]),
     ]
 
 
 # =========================
-# MARKET MODULE
+# MARKET + SHARP MONEY
 # =========================
 def odds_snapshot(game_key: str, home_team: str, status: str, total_runs: int = 0) -> Dict[str, Any]:
     global api_status
@@ -255,8 +275,12 @@ def odds_snapshot(game_key: str, home_team: str, status: str, total_runs: int = 
             money_under = 76
         if "in progress" in (status or "").lower():
             current = max(5.5, round(total_runs + 4.5, 1))
-            public_under = 50
-            money_under = 66
+            if total_runs <= 3:
+                money_under = 66
+                public_under = 50
+            else:
+                money_under = 43
+                public_under = 47
 
         return {
             "opening_total": 8.5,
@@ -277,19 +301,12 @@ def odds_snapshot(game_key: str, home_team: str, status: str, total_runs: int = 
 
     api_status["odds"] = "KEY DETECTED"
     return {
-        "opening_total": 8.5,
-        "current_total": 8.5,
-        "live_total": None,
-        "open_price": -110,
-        "current_price": -110,
-        "best_book": "Provider",
-        "best_line": "N/A",
-        "public_under_pct": 50,
-        "money_under_pct": 50,
-        "public_over_pct": 50,
-        "money_over_pct": 50,
-        "steam_books": 0,
-        "sharp_books": 0,
+        "opening_total": 8.5, "current_total": 8.5, "live_total": None,
+        "open_price": -110, "current_price": -110,
+        "best_book": "Provider", "best_line": "N/A",
+        "public_under_pct": 50, "money_under_pct": 50,
+        "public_over_pct": 50, "money_over_pct": 50,
+        "steam_books": 0, "sharp_books": 0,
         "market_status": "ODDS_API_KEY detected - provider mapping pending",
     }
 
@@ -325,22 +342,26 @@ def sharp_money_analysis(odds: Dict[str, Any], history: List[Dict[str, Any]]) ->
         under_sharp += 25
     elif line_move > 0:
         over_sharp += 25
+
     if money_under - public_under >= 15:
         under_sharp += 25
     if money_over - public_over >= 15:
         over_sharp += 25
+
     if steam_books >= 3 and line_move <= 0:
         under_sharp += 20
     if steam_books >= 3 and line_move > 0:
         over_sharp += 20
+
     if sharp_books >= 3:
         if money_under >= money_over:
             under_sharp += 12
         else:
             over_sharp += 12
 
-    under_sharp = max(0, min(100, under_sharp))
-    over_sharp = max(0, min(100, over_sharp))
+    under_sharp = clamp(under_sharp)
+    over_sharp = clamp(over_sharp)
+
     reverse_under = "YES" if public_under < 50 and money_under >= 65 and line_move <= 0 else "NO"
     reverse_over = "YES" if public_over < 50 and money_over >= 65 and line_move >= 0 else "NO"
     steam_move = "YES" if steam_books >= 3 else "NO"
@@ -366,6 +387,9 @@ def sharp_money_analysis(odds: Dict[str, Any], history: List[Dict[str, Any]]) ->
     }
 
 
+# =========================
+# CONTEXT MODULES
+# =========================
 def weather_snapshot(home_team: str) -> Dict[str, Any]:
     global api_status
     api_status["weather"] = "SIMULATED" if not WEATHER_API_KEY else "KEY DETECTED"
@@ -419,109 +443,45 @@ def base_pressure(runners: List[str], outs: int) -> int:
     return 0
 
 
+def estimate_ev(score: int, edge_diff: int) -> float:
+    if score < 68 or edge_diff < 5:
+        return -2.5
+    return round((score - 76) * 0.55 + edge_diff * 0.45, 1)
+
+
+def kelly_pct(ev: float, score: int) -> float:
+    if ev <= 0 or score < 80:
+        return 0.0
+    raw = (ev / 100.0) * (score / 100.0) * 22
+    return round(max(0, min(MAX_KELLY_PCT, raw)), 2)
+
+
+def stake_amount(kelly: float) -> float:
+    return round(BANKROLL * kelly / 100.0, 2)
+
+
+def win_probability(score: int, edge_diff: int) -> int:
+    if score <= 0:
+        return 0
+    return max(40, min(96, int(45 + score * 0.42 + edge_diff * 0.8)))
+
+
 # =========================
-# LIVE UNDER ENGINE
+# PREGAME + LIVE ENGINES
 # =========================
-def live_under_engine(total_runs: int, inning: int, outs: int, runners: List[str], status: str, live_total: Optional[float], sharp: Dict[str, Any]) -> Tuple[int, str, float, float, int, List[str]]:
-    if "in progress" not in (status or "").lower():
-        return 0, "NOT LIVE", -2.5, 0.0, 0, ["Game is not live"]
-
-    score = 45
-    reasons = []
-
-    if inning >= 7:
-        score += 32
-        reasons.append("Late inning live under zone")
-    elif inning == 6:
-        score += 24
-        reasons.append("6th inning under window")
-    elif inning == 5:
-        score += 15
-        reasons.append("5th inning watch zone")
-    elif inning == 4:
-        score += 5
-        reasons.append("Early middle inning")
-    else:
-        score -= 18
-        reasons.append("Too early for live under")
-
-    if total_runs <= 2:
-        score += 25
-        reasons.append("Very low run pace")
-    elif total_runs <= 4:
-        score += 16
-        reasons.append("Low run pace")
-    elif total_runs <= 6:
-        score += 4
-        reasons.append("Average run pace")
-    else:
-        score -= 18
-        reasons.append("High run pace")
-
-    pressure = base_pressure(runners, outs)
-    if pressure:
-        score -= int(pressure * 0.85)
-        reasons.append(f"Base pressure risk -{int(pressure * 0.85)}")
-    else:
-        score += 8
-        reasons.append("Bases empty")
-
-    if outs == 2:
-        score += 8
-        reasons.append("2 outs")
-    elif outs == 0:
-        score -= 7
-        reasons.append("0 outs risk")
-
-    if live_total:
-        cushion = live_total - total_runs
-        if cushion >= 5:
-            score += 10
-            reasons.append("Live total has enough cushion")
-        elif cushion >= 3:
-            score += 4
-            reasons.append("Live total fair")
-        else:
-            score -= 12
-            reasons.append("Live total too tight")
-
-    if sharp.get("sharp_side") == "UNDER":
-        score += 8
-        reasons.append("Sharp money supports under")
-    elif sharp.get("sharp_side") == "OVER":
-        score -= 8
-        reasons.append("Sharp money against under")
-
-    score = max(0, min(100, score))
-    ev = round((score - 76) * 0.55 + max(0, sharp.get("under_sharp", 50) - 60) * 0.12, 1)
-    win = max(0, min(96, int(45 + score * 0.45 + max(ev, 0) * 0.7)))
-    kelly = kelly_pct(ev, score)
-
-    if score >= LIVE_UNDER_ALERT_SCORE and ev >= 4:
-        action = "LIVE BET UNDER"
-    elif score >= 78:
-        action = "LIVE WATCH"
-    else:
-        action = "PASS"
-
-    return score, action, ev, kelly, win, reasons
-
-
-def pregame_scores(g, away_pitcher, home_pitcher, home_team, weather, umpire, bullpen, lineup, sharp):
+def pregame_engine(g, away_pitcher, home_pitcher, home_team, weather, umpire, bullpen, lineup, sharp):
     status = g.get("status", {}).get("detailedState", "")
     s = (status or "").lower()
     if "scheduled" not in s and "pre-game" not in s and "warmup" not in s:
-        return 0, 0, ["Not pregame"], ["Not pregame"]
+        return 0, 0, "PASS", 0, 0, -2.5, 0.0, 0, "No Bet", ["Not pregame"]
 
     game_dt = parse_game_time(g.get("gameDate", ""))
     if not game_dt:
-        return 55, 55, ["Game time unavailable"], ["Game time unavailable"]
+        return 55, 55, "PASS", 55, 0, -2.5, 0.0, 0, "No Bet", ["Game time unavailable"]
 
     hours_to_start = (game_dt - now_utc()).total_seconds() / 3600
-    if hours_to_start < -0.25:
-        return 0, 0, ["Game already started"], ["Game already started"]
     if hours_to_start > PREGAME_WINDOW_HOURS:
-        return 45, 45, [f"Too far: {hours_to_start:.1f}h"], [f"Too far: {hours_to_start:.1f}h"]
+        return 45, 45, "PASS", 45, 0, -2.5, 0.0, 0, "No Bet", [f"Too far: {hours_to_start:.1f}h"]
 
     under = 50
     over = 50
@@ -550,57 +510,134 @@ def pregame_scores(g, away_pitcher, home_pitcher, home_team, weather, umpire, bu
     under += int(max(0, sharp["under_sharp"] - 60) / 4)
     over += int(max(0, sharp["over_sharp"] - 60) / 4)
 
-    if sharp["sharp_side"] == "UNDER":
-        under_reasons.append("Sharp money Under")
-    elif sharp["sharp_side"] == "OVER":
-        over_reasons.append("Sharp money Over")
+    under, over = clamp(under), clamp(over)
+    diff = abs(under - over)
 
-    return max(0, min(100, under)), max(0, min(100, over)), under_reasons, over_reasons
-
-
-def final_decision(under_score: int, over_score: int) -> Tuple[str, int, int, str]:
-    diff = abs(under_score - over_score)
     if diff < MIN_EDGE_DIFF:
-        return "PASS", max(under_score, over_score), diff, "No clear edge"
-    if under_score > over_score:
-        return "UNDER", under_score, diff, "Under edge"
-    return "OVER", over_score, diff, "Over edge"
+        decision, edge_score, reasons, line = "PASS", max(under, over), ["Under and Over too close"], "No Bet"
+    elif under > over:
+        decision, edge_score, reasons, line = "UNDER", under, under_reasons, "Under"
+    else:
+        decision, edge_score, reasons, line = "OVER", over, over_reasons, "Over"
+
+    ev = estimate_ev(edge_score, diff)
+    kelly = kelly_pct(ev, edge_score)
+    win = win_probability(edge_score, diff)
+    return under, over, decision, edge_score, diff, ev, kelly, win, line, reasons
 
 
-def estimate_ev(score: int, edge_diff: int) -> float:
-    if score < 68 or edge_diff < 5:
-        return -2.5
-    return round((score - 76) * 0.55 + edge_diff * 0.45, 1)
+def live_engine(total_runs, inning, outs, runners, status, live_total, sharp):
+    if "in progress" not in (status or "").lower():
+        return 0, 0, "NOT LIVE", 0, 0, -2.5, 0.0, 0, ["Game is not live"]
+
+    under = 45
+    over = 45
+    under_reasons = []
+    over_reasons = []
+
+    if inning >= 7:
+        under += 32
+        over -= 8
+        under_reasons.append("Late inning live under zone")
+    elif inning == 6:
+        under += 24
+        under_reasons.append("6th inning under window")
+    elif inning == 5:
+        under += 15
+        over += 3
+        under_reasons.append("5th inning watch zone")
+    elif inning == 4:
+        under += 5
+        over += 8
+    else:
+        under -= 18
+        over += 15
+        over_reasons.append("Early inning over potential")
+
+    if total_runs <= 2:
+        under += 25
+        over -= 10
+        under_reasons.append("Very low run pace")
+    elif total_runs <= 4:
+        under += 16
+        under_reasons.append("Low run pace")
+    elif total_runs <= 6:
+        under += 4
+        over += 8
+    else:
+        over += 22
+        under -= 18
+        over_reasons.append("High scoring pace")
+
+    pressure = base_pressure(runners, outs)
+    if pressure:
+        over += pressure
+        under -= int(pressure * 0.85)
+        over_reasons.append(f"Base pressure +{pressure}")
+    else:
+        under += 8
+        under_reasons.append("Bases empty")
+
+    if outs == 2:
+        under += 8
+        under_reasons.append("2 outs")
+    elif outs == 0:
+        over += 8
+        under -= 7
+        over_reasons.append("0 outs risk")
+
+    if live_total:
+        cushion = live_total - total_runs
+        if cushion >= 5:
+            under += 10
+            under_reasons.append("Live total has cushion")
+        elif cushion >= 3:
+            under += 4
+        else:
+            over += 10
+            over_reasons.append("Live total too tight")
+
+    if sharp.get("sharp_side") == "UNDER":
+        under += 8
+        under_reasons.append("Sharp under support")
+    elif sharp.get("sharp_side") == "OVER":
+        over += 8
+        over_reasons.append("Sharp over support")
+
+    under, over = clamp(under), clamp(over)
+    diff = abs(under - over)
+
+    if diff < MIN_EDGE_DIFF:
+        decision, edge_score, reasons = "PASS", max(under, over), ["Live edge too close"]
+    elif under > over:
+        decision, edge_score, reasons = "LIVE UNDER", under, under_reasons
+    else:
+        decision, edge_score, reasons = "LIVE OVER", over, over_reasons
+
+    ev = estimate_ev(edge_score, diff)
+    kelly = kelly_pct(ev, edge_score)
+    win = win_probability(edge_score, diff)
+    return under, over, decision, edge_score, diff, ev, kelly, win, reasons
 
 
-def kelly_pct(ev: float, score: int) -> float:
-    if ev <= 0 or score < 80:
-        return 0.0
-    raw = (ev / 100.0) * (score / 100.0) * 22
-    return round(max(0, min(MAX_KELLY_PCT, raw)), 2)
+def action_from(decision, score, ev, alert_score):
+    if decision in ["UNDER", "OVER", "LIVE UNDER", "LIVE OVER"] and score >= alert_score and ev >= 4:
+        return "BET NOW"
+    if decision != "PASS" and score >= 78:
+        return "WATCH"
+    return "PASS"
 
 
-def stake_amount(kelly: float) -> float:
-    return round(BANKROLL * kelly / 100.0, 2)
-
-
-def win_probability(score: int, edge_diff: int) -> int:
-    if score <= 0:
-        return 0
-    return max(40, min(96, int(45 + score * 0.42 + edge_diff * 0.8)))
-
-
-def data_quality_value(away_pitcher: str, home_pitcher: str, source: str) -> int:
-    q = 45
-    if away_pitcher != "TBD" and home_pitcher != "TBD":
-        q += 25
-    if source == "LIVE":
-        q += 10
-    if ODDS_API_KEY:
-        q += 10
-    if WEATHER_API_KEY:
-        q += 8
-    return min(q, 98)
+def ai_comment(g):
+    if g["live_decision"] == "LIVE UNDER":
+        return "Live Under setup: low run pace, manageable base state, and market support. Verify live total before entry."
+    if g["live_decision"] == "LIVE OVER":
+        return "Live Over setup: run pace or base pressure is dangerous for Under. Avoid Under here."
+    if g["pregame_decision"] == "UNDER":
+        return "Pregame Under lean: pitcher, park, weather, and sharp profile favor a lower-scoring game."
+    if g["pregame_decision"] == "OVER":
+        return "Pregame Over lean: park, lineup, market, or weak pitching profile favors runs."
+    return "No clear edge. Best decision is PASS until the market or live state improves."
 
 
 def parse_game(g: Dict[str, Any], source: str = "LIVE") -> Dict[str, Any]:
@@ -633,108 +670,80 @@ def parse_game(g: Dict[str, Any], source: str = "LIVE") -> Dict[str, Any]:
     bullpen = bullpen_snapshot(away_team, home_team)
     lineup = lineup_snapshot(away_team, home_team)
 
-    pre_under, pre_over, pre_under_reasons, pre_over_reasons = pregame_scores(
+    pu, po, pd, ps, pdiff, pev, pk, pwin, pline, preasons = pregame_engine(
         g, away_pitcher, home_pitcher, home_team, weather, umpire, bullpen, lineup, sharp
     )
-    decision, edge_score, edge_diff, decision_note = final_decision(pre_under, pre_over)
 
-    ev = estimate_ev(edge_score, edge_diff)
-    kelly = kelly_pct(ev, edge_score)
-    win_prob = win_probability(edge_score, edge_diff)
-
-    if decision == "UNDER":
-        reasons = pre_under_reasons
-        recommended_line = f"Under {odds['current_total']}"
-    elif decision == "OVER":
-        reasons = pre_over_reasons
-        recommended_line = f"Over {odds['current_total']}"
-    else:
-        reasons = ["Under and Over are too close"]
-        recommended_line = "No Bet"
-
-    pregame_action = "PREGAME BET" if decision != "PASS" and edge_score >= PREGAME_ALERT_SCORE and ev >= 4 else "WATCH" if decision != "PASS" and edge_score >= 78 else "PASS"
-
-    live_score, live_action, live_ev, live_kelly, live_win, live_reasons = live_under_engine(
+    lu, lo, ld, ls_score, ldiff, lev, lk, lwin, lreasons = live_engine(
         total, inning, outs, runners, status, odds.get("live_total"), sharp
     )
 
-    best_action_rank = 3 if live_action == "LIVE BET UNDER" else 2 if pregame_action == "PREGAME BET" else 1 if live_action == "LIVE WATCH" or pregame_action == "WATCH" else 0
+    p_action = action_from(pd, ps, pev, PREGAME_ALERT_SCORE)
+    l_action = action_from(ld, ls_score, lev, LIVE_ALERT_SCORE)
 
-    return {
+    best_rank = 4 if l_action == "BET NOW" else 3 if p_action == "BET NOW" else 2 if l_action == "WATCH" else 1 if p_action == "WATCH" else 0
+    best_decision = ld if l_action in ["BET NOW", "WATCH"] else pd
+    best_score = ls_score if l_action in ["BET NOW", "WATCH"] else ps
+    best_ev = lev if l_action in ["BET NOW", "WATCH"] else pev
+    best_kelly = lk if l_action in ["BET NOW", "WATCH"] else pk
+    best_win = lwin if l_action in ["BET NOW", "WATCH"] else pwin
+    best_action = l_action if l_action in ["BET NOW", "WATCH"] else p_action
+
+    item = {
         "game_pk": g.get("gamePk"),
         "source": source,
         "game_date": g.get("gameDate", ""),
         "time_label": game_time_label(g.get("gameDate", "")),
         "time_left": time_left_label(g.get("gameDate", "")),
-        "away": away_team,
-        "home": home_team,
-        "away_short": short_team(away_team),
-        "home_short": short_team(home_team),
-        "away_pitcher": away_pitcher,
-        "home_pitcher": home_pitcher,
-        "away_runs": away_runs,
-        "home_runs": home_runs,
-        "total_runs": total,
-        "inning": inning_text(half, inning),
-        "outs": outs,
-        "runners": runner_label(runners),
-        "status_label": status_label(status),
+        "away": away_team, "home": home_team,
+        "away_short": short_team(away_team), "home_short": short_team(home_team),
+        "away_pitcher": away_pitcher, "home_pitcher": home_pitcher,
+        "away_runs": away_runs, "home_runs": home_runs, "total_runs": total,
+        "inning": inning_text(half, inning), "inning_num": inning, "outs": outs,
+        "runners": runner_label(runners), "status_label": status_label(status),
         "is_live": "in progress" in (status or "").lower(),
-        "odds": odds,
-        "sharp": sharp,
-        "weather": weather,
-        "umpire": umpire,
-        "bullpen": bullpen,
-        "lineup": lineup,
+        "odds": odds, "sharp": sharp, "weather": weather, "umpire": umpire, "bullpen": bullpen, "lineup": lineup,
 
-        "pregame_under": pre_under,
-        "pregame_over": pre_over,
-        "decision": decision,
-        "decision_note": decision_note,
-        "edge_score": edge_score,
-        "edge_diff": edge_diff,
-        "ev": ev,
-        "kelly": kelly,
-        "stake": stake_amount(kelly),
-        "win_prob": win_prob,
-        "quality": f"{data_quality_value(away_pitcher, home_pitcher, source)}%",
-        "recommended_line": recommended_line,
-        "reasons": reasons,
-        "pregame_action": pregame_action,
+        "pregame_under": pu, "pregame_over": po, "pregame_decision": pd,
+        "pregame_score": ps, "pregame_diff": pdiff, "pregame_ev": pev,
+        "pregame_kelly": pk, "pregame_stake": stake_amount(pk), "pregame_win": pwin,
+        "pregame_line": f"{pline} {odds['current_total']}" if pline != "No Bet" else "No Bet",
+        "pregame_reasons": preasons, "pregame_action": p_action,
 
-        "live_under_score": live_score,
-        "live_under_action": live_action,
-        "live_under_ev": live_ev,
-        "live_under_kelly": live_kelly,
-        "live_under_stake": stake_amount(live_kelly),
-        "live_under_win": live_win,
-        "live_under_reasons": live_reasons,
+        "live_under": lu, "live_over": lo, "live_decision": ld,
+        "live_score": ls_score, "live_diff": ldiff, "live_ev": lev,
+        "live_kelly": lk, "live_stake": stake_amount(lk), "live_win": lwin,
+        "live_reasons": lreasons, "live_action": l_action,
 
-        "best_action_rank": best_action_rank,
+        "best_rank": best_rank, "best_decision": best_decision, "best_score": best_score,
+        "best_ev": best_ev, "best_kelly": best_kelly, "best_stake": stake_amount(best_kelly),
+        "best_win": best_win, "best_action": best_action,
     }
+    item["ai_comment"] = ai_comment(item)
+    return item
 
 
+# =========================
+# REFRESH + BOT
+# =========================
 def refresh_games() -> List[Dict[str, Any]]:
     global latest_games, last_update, last_error, last_refresh_ok, api_status
     source = "LIVE"
-    raw_games = []
     try:
         raw_games = fetch_mlb_games()
         if not raw_games:
             raise RuntimeError("MLB API returned zero games for today.")
         last_error = ""
         last_refresh_ok = True
-        source = "LIVE"
     except Exception as e:
         last_error = str(e)
         last_refresh_ok = False
         api_status["mlb"] = "ERROR"
-        print("MLB API error:", repr(e))
         raw_games = fallback_games() if USE_SAMPLE_ON_ERROR else []
         source = "SAMPLE"
 
     games = [parse_game(g, source=source) for g in raw_games]
-    games.sort(key=lambda x: (x["best_action_rank"], x["live_under_score"], x["edge_score"], x["edge_diff"]), reverse=True)
+    games.sort(key=lambda x: (x["best_rank"], x["best_score"], abs(x["pregame_under"] - x["pregame_over"])), reverse=True)
     latest_games = games
     last_update = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     api_status["games_loaded"] = len(games)
@@ -742,57 +751,43 @@ def refresh_games() -> List[Dict[str, Any]]:
 
 
 def filtered_games():
-    return [g for g in latest_games if max(g["edge_score"], g["live_under_score"]) >= MIN_DISPLAY_SCORE]
+    return [g for g in latest_games if max(g["pregame_score"], g["live_score"]) >= MIN_DISPLAY_SCORE]
 
 
 def best_bet():
-    games = [g for g in filtered_games() if g["live_under_action"] == "LIVE BET UNDER" or g["pregame_action"] == "PREGAME BET"]
-    return games[0] if games else (filtered_games()[0] if filtered_games() else None)
+    games = filtered_games()
+    strong = [g for g in games if g["best_action"] == "BET NOW"]
+    return strong[0] if strong else (games[0] if games else None)
 
 
-def telegram_live_alert(g: Dict[str, Any]) -> str:
+def telegram_alert(g: Dict[str, Any]) -> str:
     return (
-        f"<b>LIVE UNDER ALERT v18</b>\n"
+        f"<b>MLB EDGE AI PRO v19</b>\n"
         f"<b>{g['away']}</b> vs <b>{g['home']}</b>\n"
-        f"Live Line: <b>Under {g['odds']['current_total']}</b>\n"
-        f"Score: <b>{g['away_runs']}-{g['home_runs']}</b> | {g['inning']} | Outs: <b>{g['outs']}</b> | Runners: <b>{g['runners']}</b>\n"
-        f"Live Under Score: <b>{g['live_under_score']}/100</b>\n"
-        f"Win Prob: <b>{g['live_under_win']}%</b> | EV: <b>{g['live_under_ev']}%</b>\n"
-        f"Kelly: <b>{g['live_under_kelly']}%</b> = <b>${g['live_under_stake']}</b>\n"
-        f"Sharp Side: <b>{g['sharp']['sharp_side']}</b> | Steam: <b>{g['sharp']['steam_move']}</b>\n"
-        f"Reasons: {'; '.join(g['live_under_reasons'])}\n\n"
-        f"Verify sportsbook line before betting."
-    )
-
-
-def telegram_pregame_alert(g: Dict[str, Any]) -> str:
-    return (
-        f"<b>PREGAME EDGE ALERT v18</b>\n"
-        f"<b>{g['away']}</b> vs <b>{g['home']}</b>\n"
-        f"Decision: <b>{g['decision']}</b> | Line: <b>{g['recommended_line']}</b>\n"
-        f"Under Score: <b>{g['pregame_under']}</b> | Over Score: <b>{g['pregame_over']}</b> | Diff: <b>{g['edge_diff']}</b>\n"
-        f"Win Prob: <b>{g['win_prob']}%</b> | EV: <b>{g['ev']}%</b>\n"
-        f"Kelly: <b>{g['kelly']}%</b> = <b>${g['stake']}</b>\n"
-        f"Reasons: {'; '.join(g['reasons'])}\n\n"
+        f"Best Decision: <b>{g['best_decision']}</b>\n"
+        f"Action: <b>{g['best_action']}</b>\n"
+        f"Score: <b>{g['best_score']}/100</b> | Win: <b>{g['best_win']}%</b> | EV: <b>{g['best_ev']}%</b>\n"
+        f"Kelly: <b>{g['best_kelly']}%</b> = <b>${g['best_stake']}</b>\n"
+        f"Pregame: U {g['pregame_under']} / O {g['pregame_over']} / {g['pregame_decision']}\n"
+        f"Live: U {g['live_under']} / O {g['live_over']} / {g['live_decision']}\n"
+        f"Score State: {g['away_runs']}-{g['home_runs']} | {g['inning']} | Outs {g['outs']} | {g['runners']}\n"
+        f"Sharp: <b>{g['sharp']['sharp_side']}</b> | Steam: <b>{g['sharp']['steam_move']}</b> | CLV: <b>{g['sharp']['clv_projection']}%</b>\n"
+        f"{g['ai_comment']}\n\n"
         f"Verify sportsbook line before betting."
     )
 
 
 def bot_loop():
     global bot_running
-    send_telegram("MLB Edge AI Pro v18 is running.")
+    send_telegram("MLB Edge AI Pro v19 Ultimate is running.")
     while bot_running:
         try:
             games = refresh_games()
             for g in games:
-                live_key = f"live-v18-{g['game_pk']}-{g['inning']}-{g['total_runs']}-{g['outs']}-{g['runners']}-{g['live_under_score']}"
-                pre_key = f"pre-v18-{g['game_pk']}-{g['decision']}-{g['edge_score']}-{g['edge_diff']}"
-                if g["live_under_action"] == "LIVE BET UNDER" and live_key not in alerted:
-                    send_telegram(telegram_live_alert(g))
-                    alerted.add(live_key)
-                if g["pregame_action"] == "PREGAME BET" and pre_key not in alerted:
-                    send_telegram(telegram_pregame_alert(g))
-                    alerted.add(pre_key)
+                key = f"v19-{g['game_pk']}-{g['best_decision']}-{g['best_score']}-{g['inning']}-{g['total_runs']}-{g['outs']}"
+                if g["best_action"] == "BET NOW" and key not in alerted:
+                    send_telegram(telegram_alert(g))
+                    alerted.add(key)
         except Exception as e:
             print("BOT ERROR:", repr(e))
         time.sleep(CHECK_EVERY_SECONDS)
@@ -806,21 +801,24 @@ def start_background_bot():
         bot_thread.start()
 
 
+# =========================
+# UI
+# =========================
 HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MLB Edge AI Pro v18</title>
+<title>MLB Edge AI Pro v19</title>
 <style>
-:root{--bg:#040b14;--panel:#071727;--line:#1e496c;--text:#f7fbff;--muted:#b8ccdf;--green:#78ff2d;--yellow:#ffd21f;--orange:#ff8a1c;--red:#ff4141;--blue:#38bdf8}
+:root{--bg:#040b14;--panel:#071727;--line:#1e496c;--text:#f7fbff;--muted:#b8ccdf;--green:#78ff2d;--yellow:#ffd21f;--red:#ff4141;--blue:#38bdf8}
 *{box-sizing:border-box}
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Arial,sans-serif;background:radial-gradient(circle at top left,#123969 0,#040b14 42%,#02060d 100%);color:var(--text);font-size:14px}
 .layout{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
 .sidebar{background:rgba(4,13,23,.96);border-right:1px solid rgba(90,130,170,.35);padding:18px 14px;position:sticky;top:0;height:100vh}
 .logo{width:52px;height:52px;border-radius:50%;background:#f8fbff;color:#d00;display:grid;place-items:center;font-size:23px;font-weight:900}
-.brand{display:flex;gap:12px;align-items:center;margin-bottom:18px}.brand h1{font-size:23px;margin:0}.brand b{color:var(--green)}
+.brand{display:flex;gap:12px;align-items:center;margin-bottom:18px}.brand h1{font-size:22px;margin:0}.brand b{color:var(--green)}
 .nav a{display:block;padding:11px 12px;border-radius:10px;color:#d9e8f6;text-decoration:none;margin:4px 0}.nav a.active,.nav a:hover{background:#0e3763;border:1px solid #2368b7}
 .sidebox{margin-top:28px;padding:14px;border-radius:12px;background:#071727;border:1px solid var(--line)}
 .main{padding:18px 18px 62px}
@@ -828,14 +826,14 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Seg
 .buttons{display:flex;gap:10px;flex-wrap:wrap}.btn{border:1px solid #245987;background:#08213a;color:#a8d6ff;border-radius:10px;padding:11px 18px;text-decoration:none;font-weight:800}.start{border-color:#2d8d2d;color:#80ff54}.stop{border-color:#b63242;color:#ff7070}
 .card{background:linear-gradient(180deg,rgba(8,24,41,.94),rgba(4,14,24,.94));border:1px solid var(--line);border-radius:18px;padding:14px;box-shadow:0 12px 28px rgba(0,0,0,.3)}
 .grid2{display:grid;grid-template-columns:2fr .95fr;gap:12px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.section{margin-top:12px}
-.cardtitle{font-weight:900;font-size:16px;margin-bottom:10px}.green{color:var(--green)}.yellow{color:var(--yellow)}.red{color:var(--red)}
+.cardtitle{font-weight:900;font-size:16px;margin-bottom:10px}.green{color:var(--green)}.yellow{color:var(--yellow)}.red{color:var(--red)}.blue{color:var(--blue)}
 .row{display:flex;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.08);padding:6px 0}
 .status{border-radius:8px;padding:4px 9px;font-weight:900}.ok{background:#0b5c25;color:#8cff4c}.bad{background:#5b1108;color:#ff8b73}.warn{background:#5b5008;color:#ffd21f}
 .teams{display:flex;align-items:center;gap:22px}.teamlogo{width:72px;height:72px;border-radius:50%;background:#102d4d;display:grid;place-items:center;font-size:31px;font-weight:900;color:var(--yellow)}.vs{text-align:center;font-weight:900}
-.bigpick{text-align:center;border:1px solid #3e7f23;background:#0b321b;border-radius:12px;padding:18px}.bigpick.over{border-color:#a23a24;background:#32140b}.bigpick.pass{border-color:#846b15;background:#2a230b}.bigpick.live{border-color:#38bdf8;background:#072c3d}.bigpick .big{font-size:38px;font-weight:900}
+.bigpick{text-align:center;border:1px solid #3e7f23;background:#0b321b;border-radius:12px;padding:18px}.bigpick.over,.bigpick.liveover{border-color:#a23a24;background:#32140b}.bigpick.pass{border-color:#846b15;background:#2a230b}.bigpick.liveunder{border-color:#38bdf8;background:#072c3d}.bigpick .big{font-size:36px;font-weight:900}
 .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.metric{background:#071727;border:1px solid #203f5d;border-radius:10px;padding:13px;text-align:center}.metric b{font-size:21px}
 .table{width:100%;border-collapse:collapse}.table th,.table td{padding:8px 9px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left}.table th{color:#bcd0e3;font-size:12px}
-.pill{border-radius:8px;padding:5px 12px;font-weight:900;display:inline-block;text-align:center;min-width:58px}.under{background:#0b5c25;color:#8cff4c}.over{background:#5b1108;color:#ff8b73}.pass{background:#5b5008;color:#ffd21f}.live{background:#073d5b;color:#7dd3fc}
+.pill{border-radius:8px;padding:5px 12px;font-weight:900;display:inline-block;text-align:center;min-width:62px}.under{background:#0b5c25;color:#8cff4c}.over{background:#5b1108;color:#ff8b73}.pass{background:#5b5008;color:#ffd21f}.live{background:#073d5b;color:#7dd3fc}
 .scorebar{height:12px;background:#102d4d;border-radius:99px;overflow:hidden}.underbar{height:100%;background:linear-gradient(90deg,#1d7f36,#78ff2d)}.overbar{height:100%;background:linear-gradient(90deg,#8a1e1e,#ff4141)}.livebar{height:100%;background:linear-gradient(90deg,#0284c7,#38bdf8)}
 .edgebar{display:grid;grid-template-columns:110px 1fr 48px;gap:8px;align-items:center;margin:8px 0}.track{height:9px;background:#102d4d;border-radius:999px;overflow:hidden}.fill{height:100%;background:linear-gradient(90deg,#38bdf8,#78ff2d)}
 .footer{position:fixed;left:220px;right:0;bottom:0;background:#050d17;border-top:1px solid #1e496c;padding:10px 18px;display:flex;gap:20px;align-items:center;font-size:13px}
@@ -845,14 +843,14 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Seg
 <body>
 <div class="layout">
 <aside class="sidebar">
-  <div class="brand"><div class="logo">MLB</div><div><h1>EDGE AI</h1><b>LIVE PRO</b><div class="small">v18</div></div></div>
+  <div class="brand"><div class="logo">MLB</div><div><h1>EDGE AI</h1><b>ULTIMATE</b><div class="small">v19 FINAL</div></div></div>
   <nav class="nav">
-    <a class="active" href="#">Dashboard</a><a href="#">Live Under</a><a href="#">Pregame Edge</a><a href="#">API Status</a><a href="#">Sharp Money</a><a href="#">Line Movement</a><a href="#">Steam Moves</a><a href="#">RLM</a><a href="#">Settings</a>
+    <a class="active" href="#">Dashboard</a><a href="#">Live Edge</a><a href="#">Pregame Edge</a><a href="#">Sharp Money</a><a href="#">Line Movement</a><a href="#">Steam / RLM</a><a href="#">Bankroll</a><a href="#">Settings</a>
   </nav>
   <div class="sidebox">
     <div class="small">ENGINE STATUS</div>
-    <p>Live Under<br><b class="green">ACTIVE</b></p>
-    <p>Pregame<br><b class="green">UNDER / OVER / PASS</b></p>
+    <p>Live Engine<br><b class="green">UNDER / OVER / PASS</b></p>
+    <p>Pregame Engine<br><b class="green">UNDER / OVER / PASS</b></p>
     <p class="small">Games Loaded<br><b>{{api.games_loaded}}</b></p>
     <p class="small">Bankroll<br><b>${{bankroll}}</b></p>
   </div>
@@ -860,7 +858,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Seg
 
 <main class="main">
   <div class="topbar">
-    <div class="title"><h2>MLB EDGE AI PRO v18</h2><div class="small">LIVE UNDER + PREGAME EDGE | Updated: {{last_update}} | Live Under Alert {{live_alert}}+ | Pregame Alert {{pregame_alert}}+</div></div>
+    <div class="title"><h2>MLB EDGE AI PRO v19 ULTIMATE</h2><div class="small">FINAL VERSION | Updated: {{last_update}} | Live Alert {{live_alert}}+ | Pregame Alert {{pregame_alert}}+</div></div>
     <div class="buttons">
       <form method="post" action="/start"><button class="btn start">Start Bot</button></form>
       <form method="post" action="/stop"><button class="btn stop">Stop Bot</button></form>
@@ -875,11 +873,11 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Seg
       <div class="row"><span>Weather API</span><b class="status {{ 'warn' if api.weather=='SIMULATED' else 'ok' }}">{{api.weather}}</b></div>
       <div class="row"><span>Telegram</span><b class="status {{ 'ok' if api.telegram=='CONNECTED' else 'warn' if api.telegram in ['UNKNOWN','MISSING'] else 'bad' }}">{{api.telegram}}</b></div>
     </div>
-    <div class="card"><div class="cardtitle">LIVE UNDER RULES</div>
-      <div class="row"><span>Best Zone</span><b>5th inning or later</b></div>
-      <div class="row"><span>Good Setup</span><b>Bases empty / 2 outs</b></div>
+    <div class="card"><div class="cardtitle">SMART RULES</div>
+      <div class="row"><span>Best Live Zone</span><b>5th inning or later</b></div>
       <div class="row"><span>Avoid</span><b>0 out + runners on</b></div>
-      <div class="row"><span>Alert</span><b>{{live_alert}}+</b></div>
+      <div class="row"><span>No Bias</span><b>Under / Over / PASS</b></div>
+      <div class="row"><span>Max Kelly</span><b>{{max_kelly}}%</b></div>
     </div>
     <div class="card"><div class="cardtitle">LAST ERROR</div>
       {% if last_error %}<p class="red">{{last_error}}</p><p class="small">Fallback sample games are shown if MLB API fails.</p>{% else %}<p class="green">No error detected.</p>{% endif %}
@@ -889,35 +887,36 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Seg
 {% if best %}
   <div class="section grid2">
     <div class="card">
-      <div class="cardtitle green">BEST SIGNAL OF THE DAY</div>
+      <div class="cardtitle green">BEST AI SIGNAL</div>
       <div class="grid2">
         <div>
           <div class="teams"><div><div class="teamlogo">{{best.away_short}}</div><b>{{best.away_short}}</b></div><div class="vs">VS<br>@</div><div><div class="teamlogo">{{best.home_short}}</div><b>{{best.home_short}}</b></div></div>
           <p class="small">Pitchers: {{best.away_pitcher}} vs {{best.home_pitcher}} | Status: {{best.status_label}} | Source: {{best.source}}</p>
         </div>
-        <div class="bigpick {{ 'live' if best.live_under_action=='LIVE BET UNDER' else best.decision|lower }}">
-          <div class="small">BEST ACTION</div>
-          <div class="big">{{best.live_under_action if best.live_under_action=='LIVE BET UNDER' else best.decision}}</div>
-          <div>{{ "Under " ~ best.odds.current_total if best.live_under_action=='LIVE BET UNDER' else best.recommended_line }}</div>
+        <div class="bigpick {{best.best_decision|replace(' ','')|lower}}">
+          <div class="small">AI DECISION</div>
+          <div class="big">{{best.best_decision}}</div>
+          <div>{{best.best_action}}</div>
         </div>
       </div>
       <div class="metrics">
-        <div class="metric">Live Under<br><b class="green">{{best.live_under_score}}</b></div>
-        <div class="metric">Pregame Under<br><b class="green">{{best.pregame_under}}</b></div>
-        <div class="metric">Pregame Over<br><b class="red">{{best.pregame_over}}</b></div>
-        <div class="metric">Live EV<br><b class="green">{{best.live_under_ev}}%</b></div>
-        <div class="metric">Pregame EV<br><b class="green">{{best.ev}}%</b></div>
-        <div class="metric">Kelly<br><b>{{best.live_under_kelly if best.live_under_action=='LIVE BET UNDER' else best.kelly}}%</b></div>
+        <div class="metric">Best Score<br><b class="green">{{best.best_score}}</b></div>
+        <div class="metric">Win Prob<br><b>{{best.best_win}}%</b></div>
+        <div class="metric">EV<br><b class="green">{{best.best_ev}}%</b></div>
+        <div class="metric">Kelly<br><b>{{best.best_kelly}}%</b></div>
+        <div class="metric">Stake<br><b>${{best.best_stake}}</b></div>
+        <div class="metric">CLV<br><b>{{best.sharp.clv_projection}}%</b></div>
       </div>
+      <p class="small">{{best.ai_comment}}</p>
     </div>
 
     <div class="card">
-      <div class="cardtitle">AI RECOMMENDATION</div>
-      <div class="row"><span>Live Under</span><b class="{{ 'green' if best.live_under_action=='LIVE BET UNDER' else 'yellow' }}">{{best.live_under_action}}</b></div>
-      <div class="row"><span>Pregame Decision</span><b class="{{ 'green' if best.decision=='UNDER' else 'red' if best.decision=='OVER' else 'yellow' }}">{{best.decision}}</b></div>
-      <div class="row"><span>Live Line</span><b>{{best.odds.current_total}}</b></div>
+      <div class="cardtitle">QUICK READ</div>
+      <div class="row"><span>Live Decision</span><b>{{best.live_decision}}</b></div>
+      <div class="row"><span>Pregame Decision</span><b>{{best.pregame_decision}}</b></div>
+      <div class="row"><span>Live O/U</span><b>{{best.odds.current_total}}</b></div>
+      <div class="row"><span>Score State</span><b>{{best.away_runs}}-{{best.home_runs}}</b></div>
       <div class="row"><span>Inning</span><b>{{best.inning}}</b></div>
-      <div class="row"><span>Outs</span><b>{{best.outs}}</b></div>
       <div class="row"><span>Runners</span><b>{{best.runners}}</b></div>
       <div class="row"><span>Sharp Side</span><b>{{best.sharp.sharp_side}}</b></div>
       <div class="row"><span>Steam</span><b>{{best.sharp.steam_move}}</b></div>
@@ -926,14 +925,16 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Seg
 {% endif %}
 
   <div class="section card">
-    <div class="cardtitle">LIVE UNDER DASHBOARD</div>
+    <div class="cardtitle">LIVE EDGE DASHBOARD</div>
     <table class="table">
-      <thead><tr><th>#</th><th>Game</th><th>Status</th><th>Score</th><th>Inning</th><th>Outs</th><th>Runners</th><th>Live O/U</th><th>Live Under</th><th>EV</th><th>Kelly</th><th>Action</th></tr></thead>
+      <thead><tr><th>#</th><th>Game</th><th>Status</th><th>Score</th><th>Inning</th><th>Runners</th><th>O/U</th><th>Live U</th><th>Live O</th><th>Decision</th><th>EV</th><th>Action</th></tr></thead>
       <tbody>
       {% for g in games[:12] %}
       <tr>
-        <td>{{loop.index}}</td><td>{{g.away_short}} @ {{g.home_short}}</td><td>{{g.status_label}}</td><td>{{g.away_runs}}-{{g.home_runs}}</td><td>{{g.inning}}</td><td>{{g.outs}}</td><td>{{g.runners}}</td>
-        <td>{{g.odds.current_total}}</td><td><span class="pill live">{{g.live_under_score}}</span></td><td class="{{ 'green' if g.live_under_ev>=0 else 'red' }}">{{g.live_under_ev}}%</td><td>{{g.live_under_kelly}}%</td><td>{{g.live_under_action}}</td>
+        <td>{{loop.index}}</td><td>{{g.away_short}} @ {{g.home_short}}</td><td>{{g.status_label}}</td><td>{{g.away_runs}}-{{g.home_runs}}</td><td>{{g.inning}}</td><td>{{g.runners}}</td><td>{{g.odds.current_total}}</td>
+        <td><span class="pill live">{{g.live_under}}</span></td><td><span class="pill over">{{g.live_over}}</span></td>
+        <td><span class="pill {{ 'under' if g.live_decision=='LIVE UNDER' else 'over' if g.live_decision=='LIVE OVER' else 'pass' }}">{{g.live_decision}}</span></td>
+        <td class="{{ 'green' if g.live_ev>=0 else 'red' }}">{{g.live_ev}}%</td><td>{{g.live_action}}</td>
       </tr>
       {% endfor %}
       </tbody>
@@ -941,16 +942,16 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Seg
   </div>
 
   <div class="section card">
-    <div class="cardtitle">PREGAME EDGE BOARD: UNDER vs OVER vs PASS</div>
+    <div class="cardtitle">PREGAME EDGE BOARD</div>
     <table class="table">
       <thead><tr><th>#</th><th>Game</th><th>Line</th><th>Time</th><th>Under</th><th>Over</th><th>Diff</th><th>Decision</th><th>EV</th><th>Kelly</th><th>Sharp</th><th>Action</th></tr></thead>
       <tbody>
       {% for g in games[:12] %}
       <tr>
         <td>{{loop.index}}</td><td>{{g.away_short}} @ {{g.home_short}}</td><td>{{g.odds.current_total}}</td><td>{{g.time_label}}</td>
-        <td><span class="pill under">{{g.pregame_under}}</span></td><td><span class="pill over">{{g.pregame_over}}</span></td><td>{{g.edge_diff}}</td>
-        <td><span class="pill {{ 'under' if g.decision=='UNDER' else 'over' if g.decision=='OVER' else 'pass' }}">{{g.decision}}</span></td>
-        <td class="{{ 'green' if g.ev>=0 else 'red' }}">{{g.ev}}%</td><td>{{g.kelly}}%</td><td>{{g.sharp.sharp_side}}</td><td>{{g.pregame_action}}</td>
+        <td><span class="pill under">{{g.pregame_under}}</span></td><td><span class="pill over">{{g.pregame_over}}</span></td><td>{{g.pregame_diff}}</td>
+        <td><span class="pill {{ 'under' if g.pregame_decision=='UNDER' else 'over' if g.pregame_decision=='OVER' else 'pass' }}">{{g.pregame_decision}}</span></td>
+        <td class="{{ 'green' if g.pregame_ev>=0 else 'red' }}">{{g.pregame_ev}}%</td><td>{{g.pregame_kelly}}%</td><td>{{g.sharp.sharp_side}}</td><td>{{g.pregame_action}}</td>
       </tr>
       {% endfor %}
       </tbody>
@@ -960,20 +961,20 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Seg
 {% for g in games[:1] %}
   <div class="section grid3">
     <div class="card">
-      <div class="cardtitle">LIVE UNDER ENGINE</div>
-      <div class="scorebar"><div class="livebar" style="width:{{g.live_under_score}}%"></div></div>
-      <h2 class="green">{{g.live_under_score}} / 100</h2>
-      <div class="row"><span>Action</span><b>{{g.live_under_action}}</b></div>
-      <div class="row"><span>Win Prob</span><b>{{g.live_under_win}}%</b></div>
-      <div class="row"><span>Stake</span><b>${{g.live_under_stake}}</b></div>
-      <p class="small">Reasons: {{ "; ".join(g.live_under_reasons) }}</p>
+      <div class="cardtitle">LIVE ENGINE BREAKDOWN</div>
+      <div class="scorebar"><div class="livebar" style="width:{{g.live_score}}%"></div></div>
+      <h2 class="blue">{{g.live_score}} / 100</h2>
+      <div class="row"><span>Decision</span><b>{{g.live_decision}}</b></div>
+      <div class="row"><span>Win Prob</span><b>{{g.live_win}}%</b></div>
+      <div class="row"><span>Stake</span><b>${{g.live_stake}}</b></div>
+      <p class="small">Reasons: {{ "; ".join(g.live_reasons) }}</p>
     </div>
     <div class="card">
       <div class="cardtitle">PREGAME ENGINE</div>
       <div class="edgebar"><span>Under</span><div class="track"><div class="fill" style="width:{{g.pregame_under}}%"></div></div><b>{{g.pregame_under}}</b></div>
       <div class="edgebar"><span>Over</span><div class="track"><div class="fill" style="width:{{g.pregame_over}}%"></div></div><b>{{g.pregame_over}}</b></div>
-      <h2 class="{{ 'green' if g.decision=='UNDER' else 'red' if g.decision=='OVER' else 'yellow' }}">{{g.decision}}</h2>
-      <p class="small">Reasons: {{ "; ".join(g.reasons) }}</p>
+      <h2>{{g.pregame_decision}}</h2>
+      <p class="small">Reasons: {{ "; ".join(g.pregame_reasons) }}</p>
     </div>
     <div class="card">
       <div class="cardtitle">SHARP MONEY</div>
@@ -981,19 +982,20 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Seg
       <div class="row"><span>Money Under</span><b class="green">{{g.sharp.money_under}}%</b></div>
       <div class="row"><span>Money Over</span><b class="red">{{g.sharp.money_over}}%</b></div>
       <div class="row"><span>Steam Move</span><b>{{g.sharp.steam_move}}</b></div>
-      <div class="row"><span>CLV Projection</span><b class="green">{{g.sharp.clv_projection}}%</b></div>
+      <div class="row"><span>RLM Under</span><b>{{g.sharp.reverse_under}}</b></div>
+      <div class="row"><span>RLM Over</span><b>{{g.sharp.reverse_over}}</b></div>
     </div>
   </div>
 {% endfor %}
 
   <div class="section grid3">
     <div class="card"><div class="cardtitle">BOT PERFORMANCE</div><div class="row"><span>Record</span><b class="green">82 - 34 - 5</b></div><div class="row"><span>Win Rate</span><b class="green">70.7%</b></div><div class="row"><span>ROI</span><b class="green">+18.4%</b></div></div>
-    <div class="card"><div class="cardtitle">V18 UPGRADE</div><p class="small">This version includes both Live Under alerts and Pregame Under/Over/PASS evaluation.</p></div>
+    <div class="card"><div class="cardtitle">FINAL RULE</div><p class="small">v19 never forces Under. It compares Live Under, Live Over, Pregame Under, Pregame Over, and PASS.</p></div>
     <div class="card"><div class="cardtitle">DISCLAIMER</div><p class="small">For informational and educational purposes only. Not financial advice. Gambling involves risk. Bet responsibly.</p></div>
   </div>
 </main>
 </div>
-<div class="footer"><b>MLB Edge AI Pro v18</b><span>Live Under Engine</span><span>Pregame Under / Over / PASS</span><span>Telegram Alerts</span></div>
+<div class="footer"><b>MLB Edge AI Pro v19 Ultimate</b><span>Live Under / Live Over</span><span>Pregame Under / Over / PASS</span><span>Sharp Money</span><span>Telegram Alerts</span></div>
 </body>
 </html>"""
 
@@ -1007,9 +1009,10 @@ def index():
         best=best_bet(),
         running=bot_running,
         last_update=last_update,
-        live_alert=LIVE_UNDER_ALERT_SCORE,
+        live_alert=LIVE_ALERT_SCORE,
         pregame_alert=PREGAME_ALERT_SCORE,
         bankroll=int(BANKROLL) if BANKROLL.is_integer() else BANKROLL,
+        max_kelly=MAX_KELLY_PCT,
         api=api_status,
         last_error=last_error,
         refresh_ok=last_refresh_ok,
@@ -1041,7 +1044,7 @@ def refresh():
 
 @app.route("/test")
 def test():
-    ok = send_telegram("Test OK: MLB Edge AI Pro v18 Telegram connected.")
+    ok = send_telegram("Test OK: MLB Edge AI Pro v19 Ultimate Telegram connected.")
     return Response("Telegram sent OK" if ok else "Telegram failed. Check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.", status=200 if ok else 500, content_type="text/plain; charset=utf-8")
 
 
