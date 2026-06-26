@@ -11,6 +11,7 @@ CHECK_EVERY_SECONDS = int(os.getenv("CHECK_EVERY_SECONDS", "300"))
 LIVE_ALERT_SCORE = int(os.getenv("LIVE_ALERT_SCORE", "86"))
 PREGAME_ALERT_SCORE = int(os.getenv("PREGAME_ALERT_SCORE", "80"))
 PREGAME_WINDOW_HOURS = int(os.getenv("PREGAME_WINDOW_HOURS", "24"))
+MIN_DISPLAY_SCORE = int(os.getenv("MIN_DISPLAY_SCORE", "68"))
 AUTO_START = os.getenv("AUTO_START", "1") == "1"
 
 MLB_SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule"
@@ -28,12 +29,14 @@ PITCHER_EDGE = {
     "George Kirby": 9, "Chris Sale": 9, "Spencer Strider": 9, "Corbin Burnes": 10,
     "Kevin Gausman": 7, "Nathan Eovaldi": 6, "Framber Valdez": 8, "Cristopher Sanchez": 8,
     "Garrett Crochet": 9, "Cole Ragans": 8, "Max Fried": 8, "Sonny Gray": 7,
+    "Spencer Arrighetti": 4, "Keider Montero": 3, "Andrew Abbott": 7, "Trevor Rogers": 4,
+    "Bryce Miller": 6, "Shane Bieber": 7,
 }
 
 PARK_UNDER_EDGE = {
     "Seattle Mariners": 5, "San Francisco Giants": 5, "Detroit Tigers": 4,
     "Cleveland Guardians": 3, "New York Mets": 2, "Oakland Athletics": 3,
-    "Pittsburgh Pirates": 2, "Miami Marlins": 2,
+    "Pittsburgh Pirates": 2, "Miami Marlins": 2, "Toronto Blue Jays": 1,
 }
 
 PARK_OVER_PENALTY = {
@@ -124,6 +127,20 @@ def rec(score: int) -> Tuple[str, str, str]:
     if score >= 78: return "⭐⭐⭐", "👀 WATCHLIST", "watch"
     if score >= 68: return "⭐⭐", "⏳ CHỜ THÊM", "wait"
     return "⭐", "❌ BỎ QUA", "avoid"
+
+def confidence(score: int) -> int:
+    if score <= 0:
+        return 0
+    # Conservative confidence estimate from score.
+    return max(40, min(97, int(score * 0.92 + 8)))
+
+def line_text(score: int) -> str:
+    # Placeholder until Odds API is added.
+    if score >= 86:
+        return "Chờ lấy Odds API — ưu tiên kiểm tra Under 8.5 / 8 / 7.5"
+    if score >= 78:
+        return "Chờ lấy Odds API — chỉ vào nếu line còn đẹp"
+    return "Chưa đủ điều kiện"
 
 def live_under_score(total_runs: int, inning: int, outs: int, runners: List[str], status: str) -> Tuple[int, List[str]]:
     if "in progress" not in (status or "").lower():
@@ -230,6 +247,7 @@ def parse_game(g: Dict[str, Any]) -> Dict[str, Any]:
     pre_score, pre_reasons = pregame_under_score(g)
     live_stars, live_rec, live_class = rec(live_score)
     pre_stars, pre_rec, pre_class = rec(pre_score)
+    best_score = max(live_score, pre_score)
 
     return {
         "game_pk": g.get("gamePk"),
@@ -240,9 +258,9 @@ def parse_game(g: Dict[str, Any]) -> Dict[str, Any]:
         "away_runs": away_runs, "home_runs": home_runs, "total_runs": total,
         "inning": inning_text(half, inning), "outs": outs, "runners": runner_vi(runners),
         "status_vi": status_vi(status),
-        "live_score": live_score, "live_reasons": live_reasons, "live_rec": live_rec, "live_class": live_class, "live_stars": live_stars,
-        "pregame_score": pre_score, "pregame_reasons": pre_reasons, "pregame_rec": pre_rec, "pregame_class": pre_class, "pregame_stars": pre_stars,
-        "best_score": max(live_score, pre_score),
+        "live_score": live_score, "live_reasons": live_reasons, "live_rec": live_rec, "live_class": live_class, "live_stars": live_stars, "live_conf": confidence(live_score), "live_line": line_text(live_score),
+        "pregame_score": pre_score, "pregame_reasons": pre_reasons, "pregame_rec": pre_rec, "pregame_class": pre_class, "pregame_stars": pre_stars, "pregame_conf": confidence(pre_score), "pregame_line": line_text(pre_score),
+        "best_score": best_score, "best_conf": confidence(best_score),
     }
 
 def refresh_games() -> List[Dict[str, Any]]:
@@ -254,6 +272,9 @@ def refresh_games() -> List[Dict[str, Any]]:
     print("Refreshed games:", len(games), "at", last_update)
     return games
 
+def filtered_games():
+    return [g for g in latest_games if g["best_score"] >= MIN_DISPLAY_SCORE]
+
 def live_alert_message(g: Dict[str, Any]) -> str:
     return (
         f"🚨 <b>LIVE UNDER ALERT</b>\n"
@@ -261,7 +282,9 @@ def live_alert_message(g: Dict[str, Any]) -> str:
         f"Inning: {g['inning']} | Outs: {g['outs']} | Runners: {g['runners']}\n"
         f"Tổng điểm hiện tại: {g['total_runs']}\n"
         f"Live Under Score: <b>{g['live_score']}/100</b> {g['live_stars']}\n"
+        f"Confidence: <b>{g['live_conf']}%</b>\n"
         f"Khuyến nghị: <b>{g['live_rec']}</b>\n"
+        f"Odds: {g['live_line']}\n"
         f"Lý do: {'; '.join(g['live_reasons'])}\n\n"
         f"⚠️ Kiểm tra live total/odds trước khi vào."
     )
@@ -272,15 +295,17 @@ def pregame_alert_message(g: Dict[str, Any]) -> str:
         f"<b>{g['away']}</b> vs <b>{g['home']}</b>\n"
         f"Pitchers: {g['away_pitcher']} vs {g['home_pitcher']}\n"
         f"Pregame Under Score: <b>{g['pregame_score']}/100</b> {g['pregame_stars']}\n"
+        f"Confidence: <b>{g['pregame_conf']}%</b>\n"
         f"Khuyến nghị: <b>{g['pregame_rec']}</b>\n"
+        f"Odds: {g['pregame_line']}\n"
         f"Lý do: {'; '.join(g['pregame_reasons'])}\n\n"
         f"⚠️ Đây là watchlist. Kiểm tra total line, lineup, weather trước khi bet."
     )
 
 def bot_loop():
     global bot_running
-    print("MLB Under Pro v5 loop started")
-    send_telegram("✅ MLB Under Pro v5 đã chạy. Bot sẽ lọc Top Under, Pregame và Live.")
+    print("MLB Under Pro v6 loop started")
+    send_telegram("✅ MLB Under Pro v6 đã chạy. Bot sẽ lọc Top Under, Confidence, Pregame và Live.")
     while bot_running:
         try:
             games = refresh_games()
@@ -308,7 +333,7 @@ HTML = """<!doctype html>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MLB Under Pro v5</title>
+<title>MLB Under Pro v6</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,Arial;margin:0;background:#06111f;color:white}
 .header{padding:18px;background:#08101e;position:sticky;top:0;z-index:10;border-bottom:1px solid #1f3b57}
@@ -320,14 +345,15 @@ h1{margin:0;font-size:25px}.small{color:#d4e4f5;font-size:14px}
 .btn{display:inline-block;margin-top:10px;margin-right:6px;background:#38bdf8;color:#001;padding:10px 14px;border-radius:12px;text-decoration:none;font-weight:800;border:0}
 .stop{background:#fb7185;color:#111827}.start{background:#22c55e;color:#111827}
 .reason{margin-top:5px;color:#e5f2ff}.box{padding:10px;border-radius:12px;background:#091a2d;border:1px solid #1f3b57}
+.badge{display:inline-block;margin-top:5px;padding:4px 8px;border-radius:999px;background:#102d4d}
 @media(min-width:800px){.grid{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
 <div class="header">
-<h1>⚾ MLB Under Pro v5</h1>
+<h1>⚾ MLB Under Pro v6</h1>
 <div class="small">Bot: {{ "ĐANG CHẠY 🟢" if running else "ĐANG DỪNG 🔴" }} | Cập nhật: {{last_update}}</div>
-<div class="small">Live Alert Score: {{live_alert}}+ | Pregame Alert Score: {{pregame_alert}}+</div>
+<div class="small">Live Alert Score: {{live_alert}}+ | Pregame Alert Score: {{pregame_alert}}+ | Ẩn game dưới {{min_display}}</div>
 <form method="post" action="/start" style="display:inline"><button class="btn start">▶ Start Bot</button></form>
 <form method="post" action="/stop" style="display:inline"><button class="btn stop">■ Stop Bot</button></form>
 <a class="btn" href="/refresh">↻ Refresh</a>
@@ -337,7 +363,7 @@ h1{margin:0;font-size:25px}.small{color:#d4e4f5;font-size:14px}
 <div class="topbox">
 <b>🏆 Top kèo Under đẹp nhất</b><br>
 {% for g in games[:5] %}
-{{loop.index}}. {{g.away}} vs {{g.home}} — Best Score: <b>{{g.best_score}}/100</b><br>
+{{loop.index}}. {{g.away}} vs {{g.home}} — Best Score: <b>{{g.best_score}}/100</b> — Confidence: <b>{{g.best_conf}}%</b><br>
 {% endfor %}
 </div>
 
@@ -351,11 +377,15 @@ h1{margin:0;font-size:25px}.small{color:#d4e4f5;font-size:14px}
    <div class="box">
      <div class="score {{g.live_class}}">Live Under: {{g.live_score}}/100 {{g.live_stars}}</div>
      <div class="{{g.live_class}}"><b>{{g.live_rec}}</b></div>
+     <div class="badge">Confidence: {{g.live_conf}}%</div>
+     <div class="reason">Odds: {{g.live_line}}</div>
      <div class="reason">Lý do live: {{ "; ".join(g.live_reasons) }}</div>
    </div>
    <div class="box">
      <div class="score {{g.pregame_class}}">Pregame Under: {{g.pregame_score}}/100 {{g.pregame_stars}}</div>
      <div class="{{g.pregame_class}}"><b>{{g.pregame_rec}}</b></div>
+     <div class="badge">Confidence: {{g.pregame_conf}}%</div>
+     <div class="reason">Odds: {{g.pregame_line}}</div>
      <div class="reason">Lý do pregame: {{ "; ".join(g.pregame_reasons) }}</div>
    </div>
  </div>
@@ -363,22 +393,28 @@ h1{margin:0;font-size:25px}.small{color:#d4e4f5;font-size:14px}
 {% endfor %}
 
 <div class="footer">
+<b>V6 có gì mới:</b><br>
+• Chỉ hiện game có Best Score từ {{min_display}} trở lên<br>
+• Có Confidence %<br>
+• Có dòng Odds placeholder để sau này gắn Odds API<br>
+• Telegram alert đẹp hơn, giảm spam<br><br>
 <b>Bảng sao:</b><br>
 ⭐⭐⭐⭐⭐ 92–100: 🔥 BET UNDER NGAY<br>
 ⭐⭐⭐⭐ 86–91: ✅ RẤT ĐẸP<br>
 ⭐⭐⭐ 78–85: 👀 WATCHLIST<br>
 ⭐⭐ 68–77: ⏳ CHỜ THÊM<br>
 ⭐ 0–67: ❌ BỎ QUA<br><br>
-Lưu ý: bản này chưa có odds API trả phí, nên vẫn cần kiểm tra O/U line, lineup và weather trước khi bet.
+Lưu ý: bản này chưa có Odds API trả phí, nên vẫn cần kiểm tra O/U line, lineup và weather trước khi bet.
 </div>
 </body>
 </html>"""
 
 @app.route("/")
 def index():
+    games = filtered_games()
     html = render_template_string(
-        HTML, games=latest_games, running=bot_running, last_update=last_update,
-        live_alert=LIVE_ALERT_SCORE, pregame_alert=PREGAME_ALERT_SCORE
+        HTML, games=games, running=bot_running, last_update=last_update,
+        live_alert=LIVE_ALERT_SCORE, pregame_alert=PREGAME_ALERT_SCORE, min_display=MIN_DISPLAY_SCORE
     )
     return Response(html, content_type="text/html; charset=utf-8")
 
@@ -401,7 +437,7 @@ def refresh():
 
 @app.route("/test")
 def test():
-    ok = send_telegram("✅ Test thành công: MLB Under Pro v5 đã kết nối Telegram.")
+    ok = send_telegram("✅ Test thành công: MLB Under Pro v6 đã kết nối Telegram.")
     return Response("Telegram sent ✅" if ok else "Telegram failed ❌. Kiểm tra TELEGRAM_BOT_TOKEN và TELEGRAM_CHAT_ID.", status=200 if ok else 500, content_type="text/plain; charset=utf-8")
 
 @app.route("/api/games")
