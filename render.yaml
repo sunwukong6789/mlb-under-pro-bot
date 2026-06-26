@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: mlb-under-web-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: AUTO_START
+        value: "1"
+      - key: ALERT_SCORE
+        value: "80"
+      - key: CHECK_EVERY_SECONDS
+        value: "60"
