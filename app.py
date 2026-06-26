@@ -661,8 +661,8 @@ def telegram_alert(g: Dict[str, Any], mode: str) -> str:
 
 def bot_loop():
     global bot_running
-    print("MLB Under Pro v12 loop started")
-    send_telegram("MLB Under Pro v12 is running.")
+    print("MLB Under Pro v13 loop started")
+    send_telegram("MLB Under Pro v13 is running.")
     while bot_running:
         try:
             games = refresh_games()
@@ -697,7 +697,7 @@ HTML = """<!doctype html>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MLB Under Pro v12</title>
+<title>MLB Under Pro v13</title>
 <style>
 :root{
   --bg:#040b14;--panel:#071727;--panel2:#0b2035;--panel3:#0e2d49;
@@ -705,11 +705,11 @@ HTML = """<!doctype html>
   --green2:#22c55e;--yellow:#ffd21f;--orange:#ff8a1c;--red:#ff4141;--blue:#38bdf8;
 }
 *{box-sizing:border-box}
-body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at top left,#123969 0,#040b14 42%,#02060d 100%);color:var(--text);font-size:14px}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Arial,sans-serif;background:radial-gradient(circle at top left,#123969 0,#040b14 42%,#02060d 100%);color:var(--text);font-size:14px;letter-spacing:.1px}
 .layout{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
 .sidebar{background:rgba(4,13,23,.96);border-right:1px solid rgba(90,130,170,.35);padding:18px 14px;position:sticky;top:0;height:100vh}
 .brand{display:flex;gap:12px;align-items:center;margin-bottom:18px}
-.logo{width:52px;height:52px;border-radius:50%;background:#fff;color:#d00;display:grid;place-items:center;font-size:30px}
+.logo{width:52px;height:52px;border-radius:50%;background:#f8fbff;color:#d00;display:grid;place-items:center;font-size:24px;font-weight:900}
 .brand h1{font-size:24px;margin:0;line-height:1}.brand b{color:var(--green)}
 .nav a{display:flex;gap:10px;align-items:center;padding:11px 12px;border-radius:10px;color:#d9e8f6;text-decoration:none;margin:4px 0}
 .nav a.active,.nav a:hover{background:#0e3763;border:1px solid #2368b7}
@@ -722,7 +722,7 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(
 .btn{border:1px solid #245987;background:#08213a;color:#a8d6ff;border-radius:10px;padding:11px 18px;text-decoration:none;font-weight:800}
 .start{border-color:#2d8d2d;color:#80ff54}.stop{border-color:#b63242;color:#ff7070}
 .grid2{display:grid;grid-template-columns:2fr .95fr;gap:12px}
-.card{background:linear-gradient(180deg,rgba(8,24,41,.94),rgba(4,14,24,.94));border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:0 10px 24px rgba(0,0,0,.25)}
+.card{background:linear-gradient(180deg,rgba(8,24,41,.94),rgba(4,14,24,.94));border:1px solid var(--line);border-radius:18px;padding:14px;box-shadow:0 12px 28px rgba(0,0,0,.25)}
 .best{display:grid;grid-template-columns:1.1fr .9fr 1fr;gap:14px;align-items:center}
 .cardtitle{font-weight:900;font-size:16px;margin-bottom:10px}.green{color:var(--green)}.yellow{color:var(--yellow)}.red{color:var(--red)}
 .teams{display:flex;align-items:center;gap:22px}.teamlogo{width:72px;height:72px;border-radius:50%;background:#102d4d;display:grid;place-items:center;font-size:38px;font-weight:900;color:var(--yellow)}
@@ -750,9 +750,9 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(
 <body>
 <div class="layout">
 <aside class="sidebar">
-  <div class="brand"><div class="logo">â¾</div><div><h1>MLB</h1><b>UNDER PRO</b><div class="small">v12</div></div></div>
+  <div class="brand"><div class="logo">MLB</div><div><h1>MLB</h1><b>UNDER PRO</b><div class="small">v13</div></div></div>
   <nav class="nav">
-    <a class="active" href="#">â Dashboard</a><a href="#">â¦ Top Under Picks</a><a href="#">â£ Live Dashboard</a><a href="#">â Odds & Lines</a><a href="#">â Line Movement</a><a href="#">â Weather Center</a><a href="#">â Umpire Database</a><a href="#">â¤ Bullpen Analysis</a><a href="#">â¥ AI Edge Analysis</a><a href="#">â Bet Tracker</a><a href="#">â Performance</a><a href="#">â Settings</a>
+    <a class="active" href="#">Dashboard</a><a href="#">Top Under Picks</a><a href="#">Live Dashboard</a><a href="#">Odds & Lines</a><a href="#">Line Movement</a><a href="#">Weather Center</a><a href="#">Umpire Database</a><a href="#">Bullpen Analysis</a><a href="#">AI Edge Analysis</a><a href="#">Bet Tracker</a><a href="#">Performance</a><a href="#">Settings</a>
   </nav>
   <div class="sidebox">
     <div class="small">BOT STATUS</div>
@@ -765,11 +765,11 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(
 
 <main class="main">
   <div class="topbar">
-    <div class="title"><h2>MLB UNDER PRO v12</h2><div class="small">â RUNNING | Updated: {{last_update}} | Live {{live_alert}}+ | Pregame {{pregame_alert}}+ | Hide below {{min_display}} | Bankroll: ${{bankroll}}</div></div>
+    <div class="title"><h2>MLB UNDER PRO v13</h2><div class="small">RUNNING | Updated: {{last_update}} | Live {{live_alert}}+ | Pregame {{pregame_alert}}+ | Hide below {{min_display}} | Bankroll: ${{bankroll}}</div></div>
     <div class="buttons">
-      <form method="post" action="/start"><button class="btn start">â Start Bot</button></form>
-      <form method="post" action="/stop"><button class="btn stop">â Stop Bot</button></form>
-      <a class="btn" href="/refresh">â» Refresh</a><a class="btn" href="/test">â Telegram</a>
+      <form method="post" action="/start"><button class="btn start">Start Bot</button></form>
+      <form method="post" action="/stop"><button class="btn stop">Stop Bot</button></form>
+      <a class="btn" href="/refresh">Refresh</a><a class="btn" href="/test">Telegram</a>
     </div>
   </div>
 
@@ -777,7 +777,7 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(
   <div class="grid2">
     <div class="card best">
       <div>
-        <div class="cardtitle green">ð BEST BET OF THE DAY</div>
+        <div class="cardtitle green">BEST BET OF THE DAY</div>
         <div class="teams">
           <div><div class="teamlogo">{{best.away_short}}</div><b>{{best.away_short}}</b></div>
           <div class="vs">vs<br>@</div>
@@ -787,7 +787,7 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(
         <div class="gauge"><div class="bar" style="width:{{best.best_score}}%"></div></div>
       </div>
       <div class="pickbox">
-        <div class="small">ð¥ HOT PICK</div>
+        <div class="small">HOT PICK</div>
         <div class="big">UNDER 8.5</div>
         <div class="price">-110 (DK)</div>
         <p class="green"><b>STRONG UNDER</b></p>
@@ -799,7 +799,7 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(
     </div>
 
     <div class="card ai">
-      <div class="cardtitle">ð AI RECOMMENDATION</div>
+      <div class="cardtitle">AI RECOMMENDATION</div>
       <div class="aihead"><b>â BET NOW</b><br>Strong Under Edge Detected</div>
       <div class="row"><span>Recommended Play</span><b>Under 8.5</b></div>
       <div class="row"><span>Best Line</span><b>8.5 (-110)</b></div>
@@ -808,14 +808,14 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(
       <div class="row"><span>Kelly</span><b class="green">{{best.best_kelly}}%</b></div>
       <div class="row"><span>Recommended Stake</span><b>${{best.best_stake}}</b></div>
       <div class="row"><span>Risk Level</span><b class="green">{{best.best_risk}}</b></div>
-      <div class="place">ð° PLACE BET NOW</div>
+      <div class="place">PLACE BET NOW</div>
       <p class="small" style="text-align:center">Use only if sportsbook line and price still match the recommended range.</p>
     </div>
   </div>
 {% endif %}
 
   <div class="section card">
-    <div class="cardtitle">ð TOP UNDER BOARD</div>
+    <div class="cardtitle">TOP UNDER BOARD</div>
     <table class="table">
       <thead><tr><th>#</th><th>Game</th><th>Line</th><th>Time</th><th>Score</th><th>Win %</th><th>EV</th><th>Kelly</th><th>Risk</th><th>Time Left</th><th>Action</th></tr></thead>
       <tbody>
@@ -825,7 +825,7 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(
         <td><span class="scorepill {{ 'score-high' if g.best_score>=88 else 'score-mid' if g.best_score>=78 else 'score-low' }}">{{g.best_score}}</span></td>
         <td>{{g.best_win_prob}}%</td><td class="{{ 'green' if g.best_ev>=0 else 'red' }}">{{'+' if g.best_ev>=0 else ''}}{{g.best_ev}}%</td><td>{{g.best_kelly}}%</td>
         <td><span class="riskpill {{ 'risk-low' if g.best_risk=='LOW' else 'risk-med' if g.best_risk=='MED' else 'risk-high' }}">{{g.best_risk}}</span></td>
-        <td>â± {{g.time_left}}</td><td><span class="actionpill {{ 'action-bet' if g.best_action=='BET' else 'action-watch' if g.best_action=='WATCH' else 'action-wait' }}">{{g.best_action}}</span></td>
+        <td>{{g.time_left}}</td><td><span class="actionpill {{ 'action-bet' if g.best_action=='BET' else 'action-watch' if g.best_action=='WATCH' else 'action-wait' }}">{{g.best_action}}</span></td>
       </tr>
       {% endfor %}
       </tbody>
@@ -836,32 +836,32 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(
 {% for g in games[:3] %}
   <div class="section cards4">
     <div class="card">
-      <div class="cardtitle">â¾ PITCHING MATCHUP</div>
+      <div class="cardtitle">PITCHING MATCHUP</div>
       <div class="match"><div><b>{{g.away_pitcher}}</b><br><span class="small">{{g.away_short}} starter</span></div><b>VS</b><div><b>{{g.home_pitcher}}</b><br><span class="small">{{g.home_short}} starter</span></div></div>
       <div class="row"><span>Pitching Edge</span><b class="green">+{{g.ai.pitch}}</b></div>
     </div>
     <div class="card">
-      <div class="cardtitle">ðª BULLPEN ANALYSIS</div>
+      <div class="cardtitle">BULLPEN ANALYSIS</div>
       <div class="row"><span>{{g.away_short}}</span><b>{{g.bullpen.away}}</b></div><div class="row"><span>{{g.home_short}}</span><b>{{g.bullpen.home}}</b></div><div class="row"><span>Bullpen Edge</span><b class="green">+{{g.bullpen.edge}}</b></div>
     </div>
     <div class="card">
-      <div class="cardtitle">ð§¢ UMPIRE REPORT</div>
+      <div class="cardtitle">UMPIRE REPORT</div>
       <div class="row"><span>Umpire</span><b>{{g.umpire.name}}</b></div><div class="row"><span>Under Record</span><b>{{g.umpire.under_pct}}</b></div><div class="row"><span>Avg Runs</span><b>{{g.umpire.avg_runs}}</b></div><div class="row"><span>Edge</span><b class="green">+{{g.umpire.edge}}</b></div>
     </div>
     <div class="card">
-      <div class="cardtitle">ð¥ LINEUP IMPACT</div>
+      <div class="cardtitle">LINEUP IMPACT</div>
       <div class="row"><span>{{g.away_short}}</span><b class="green">+2</b></div><div class="row"><span>{{g.home_short}}</span><b class="green">+2</b></div><div class="row"><span>Lineup Edge</span><b class="green">+{{g.lineup.edge}}</b></div>
     </div>
   </div>
 
   <div class="section livebox">
     <div class="card">
-      <div class="cardtitle">ð LIVE UNDER DASHBOARD <span class="green">{{g.status_label}}</span></div>
+      <div class="cardtitle">LIVE UNDER DASHBOARD <span class="green">{{g.status_label}}</span></div>
       <h2>{{g.away_short}} {{g.away_runs}} - {{g.home_runs}} {{g.home_short}}</h2>
       <div class="row"><span>Inning</span><b>{{g.inning}}</b></div><div class="row"><span>Outs</span><b>{{g.outs}}</b></div><div class="row"><span>Runners</span><b>{{g.runners}}</b></div><div class="row"><span>Current O/U</span><b>{{g.odds.current_total}}</b></div><div class="row"><span>Live EV</span><b class="green">{{g.live_ev}}%</b></div>
     </div>
     <div class="card">
-      <div class="cardtitle">ð§  AI EDGE BREAKDOWN</div>
+      <div class="cardtitle">AI EDGE BREAKDOWN</div>
       {% for label,val in [('Pitching',g.ai.pitch),('Bullpen',g.ai.bullpen),('Weather',g.ai.weather),('Umpire',g.ai.umpire),('Lineup',g.ai.lineup),('Park',g.ai.park),('Market',g.ai.market)] %}
       <div class="edgebar"><span>{{label}}</span><div class="track"><div class="fill" style="width:{{ [val*4,100]|min }}%"></div></div><b>+{{val}}</b></div>
       {% endfor %}
@@ -871,15 +871,15 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(
 {% endfor %}
 
   <div class="section cards3">
-    <div class="card"><div class="cardtitle">ð PROBABILITY BREAKDOWN</div><div class="row"><span>Under 7.5</span><b class="green">71%</b></div><div class="row"><span>Under 8.5</span><b class="green">93%</b></div><div class="row"><span>Under 9</span><b class="green">96%</b></div></div>
-    <div class="card"><div class="cardtitle">ð BOT PERFORMANCE</div><div class="row"><span>Record</span><b class="green">78 - 32 - 4</b></div><div class="row"><span>Win Rate</span><b class="green">69.6%</b></div><div class="row"><span>ROI</span><b class="green">+18.6%</b></div><div class="row"><span>Units</span><b class="green">+24.3</b></div></div>
-    <div class="card"><div class="cardtitle">â ï¸ Disclaimer</div><p class="small">For informational and educational purposes only. Not financial advice. Gambling involves risk. Bet responsibly.</p></div>
+    <div class="card"><div class="cardtitle">PROBABILITY BREAKDOWN</div><div class="row"><span>Under 7.5</span><b class="green">71%</b></div><div class="row"><span>Under 8.5</span><b class="green">93%</b></div><div class="row"><span>Under 9</span><b class="green">96%</b></div></div>
+    <div class="card"><div class="cardtitle">BOT PERFORMANCE</div><div class="row"><span>Record</span><b class="green">78 - 32 - 4</b></div><div class="row"><span>Win Rate</span><b class="green">69.6%</b></div><div class="row"><span>ROI</span><b class="green">+18.6%</b></div><div class="row"><span>Units</span><b class="green">+24.3</b></div></div>
+    <div class="card"><div class="cardtitle">DISCLAIMER</div><p class="small">For informational and educational purposes only. Not financial advice. Gambling involves risk. Bet responsibly.</p></div>
   </div>
 </main>
 </div>
 
 <div class="footer">
-  <b>ð RECENT RESULTS</b> <span class="result w">W</span><span class="result w">W</span><span class="result w">W</span><span class="result l">L</span><span class="result w">W</span><span class="result p">P</span><span class="result w">W</span><span class="result l">L</span>
+  <b>RECENT RESULTS</b> <span class="result w">W</span><span class="result w">W</span><span class="result w">W</span><span class="result l">L</span><span class="result w">W</span><span class="result p">P</span><span class="result w">W</span><span class="result l">L</span>
   <span>Last 10 ROI: <b class="green">+12.4 Units</b></span>
   <span>Last 10 Win Rate: <b class="green">70%</b></span>
 </div>
@@ -932,7 +932,7 @@ def refresh():
 
 @app.route("/test")
 def test():
-    ok = send_telegram("Test OK: MLB Under Pro v12 Telegram connected.")
+    ok = send_telegram("Test OK: MLB Under Pro v13 Telegram connected.")
     return Response(
         "Telegram sent OK" if ok else "Telegram failed. Check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.",
         status=200 if ok else 500,
