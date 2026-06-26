@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, time, threading, datetime as dt, math
+import os, time, threading, datetime as dt
 from typing import Dict, Any, List, Set, Tuple
 import requests
 from flask import Flask, jsonify, render_template_string, redirect, url_for, Response
@@ -14,6 +14,10 @@ MIN_DISPLAY_SCORE = int(os.getenv("MIN_DISPLAY_SCORE", "70"))
 PREGAME_WINDOW_HOURS = int(os.getenv("PREGAME_WINDOW_HOURS", "24"))
 AUTO_START = os.getenv("AUTO_START", "1") == "1"
 
+# Optional API keys for future real data.
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
+
 MLB_SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule"
 
 app = Flask(__name__)
@@ -25,7 +29,6 @@ alerted: Set[str] = set()
 bot_running = False
 bot_thread = None
 
-# Manual lightweight model until Odds/Weather/Umpire APIs are connected.
 PITCHER_EDGE = {
     "Paul Skenes": 12, "Tarik Skubal": 12, "Zack Wheeler": 11, "Logan Gilbert": 10,
     "George Kirby": 10, "Chris Sale": 9, "Spencer Strider": 9, "Corbin Burnes": 10,
@@ -33,20 +36,25 @@ PITCHER_EDGE = {
     "Garrett Crochet": 9, "Cole Ragans": 8, "Max Fried": 8, "Sonny Gray": 7,
     "Spencer Arrighetti": 4, "Keider Montero": 3, "Andrew Abbott": 7, "Trevor Rogers": 4,
     "Bryce Miller": 6, "Shane Bieber": 7, "Pablo Lopez": 6, "Joe Ryan": 7,
+    "Luis Castillo": 7, "Mitch Keller": 5, "Hunter Greene": 6,
 }
 
 PARK_UNDER_EDGE = {
     "Seattle Mariners": 5, "San Francisco Giants": 5, "Detroit Tigers": 4,
     "Cleveland Guardians": 3, "New York Mets": 2, "Oakland Athletics": 3,
     "Pittsburgh Pirates": 2, "Miami Marlins": 2, "Toronto Blue Jays": 1,
-    "Baltimore Orioles": 1,
+    "Baltimore Orioles": 1, "San Diego Padres": 3,
 }
 
 PARK_OVER_PENALTY = {
     "Colorado Rockies": -10, "Cincinnati Reds": -4, "Boston Red Sox": -3,
-    "Philadelphia Phillies": -2, "New York Yankees": -2,
+    "Philadelphia Phillies": -2, "New York Yankees": -2, "Texas Rangers": -1,
 }
 
+UMPIRE_UNDER_EDGE = {
+    # Placeholder pool until real umpire data is connected.
+    "Unknown": 0,
+}
 
 def today() -> str:
     return dt.datetime.now().strftime("%Y-%m-%d")
@@ -135,11 +143,10 @@ def confidence(score: int) -> int:
     if score <= 0: return 0
     return max(35, min(98, int(score * 0.9 + 10)))
 
-def estimated_ev(score: int) -> float:
-    # Placeholder EV estimate until real odds are attached.
+def estimated_ev(score: int, odds_edge: int = 0, weather_edge: int = 0) -> float:
     if score < 70:
         return -4.0
-    return round((score - 78) * 0.65, 1)
+    return round((score - 78) * 0.65 + odds_edge * 0.35 + weather_edge * 0.25, 1)
 
 def ev_class(ev: float) -> str:
     if ev >= 8: return "elite"
@@ -159,13 +166,54 @@ def recommended_line(score: int, mode: str) -> str:
         if score >= 80: return "Watchlist, chờ line tốt hơn"
         return "Không ưu tiên pregame"
 
-def data_quality(away_pitcher: str, home_pitcher: str, score: int) -> str:
-    q = 50
-    if away_pitcher != "TBD" and home_pitcher != "TBD":
-        q += 25
-    if score >= 80:
-        q += 10
-    return f"{min(q, 95)}%"
+def odds_snapshot(away: str, home: str, score: int) -> Dict[str, Any]:
+    # V8 supports optional ODDS_API_KEY, but no paid API is required to run.
+    # Until the key/provider is connected, this returns a clear placeholder.
+    if not ODDS_API_KEY:
+        return {
+            "opening_total": "Chưa gắn Odds API",
+            "current_total": "Chưa gắn Odds API",
+            "movement": "Chưa có line movement",
+            "sharp": "Chờ dữ liệu odds thật",
+            "edge": 0,
+        }
+
+    # Safe placeholder for future integration.
+    return {
+        "opening_total": "Đã có ODDS_API_KEY",
+        "current_total": "Cần map provider",
+        "movement": "Đang chờ tích hợp endpoint",
+        "sharp": "Chưa đủ dữ liệu",
+        "edge": 0,
+    }
+
+def weather_snapshot(home_team: str) -> Dict[str, Any]:
+    # Placeholder until stadium coordinates + weather provider are added.
+    edge = 0
+    if home_team in PARK_UNDER_EDGE:
+        edge += 1
+    return {
+        "wind": "Chưa gắn Weather API",
+        "temp": "Chưa có",
+        "roof": "Chưa có",
+        "impact": f"Park/weather edge tạm tính: +{edge}" if edge else "Chưa có weather edge",
+        "edge": edge,
+    }
+
+def umpire_snapshot() -> Dict[str, Any]:
+    return {
+        "name": "Chưa có umpire",
+        "under_pct": "Chưa có",
+        "edge": 0,
+    }
+
+def data_quality(away_pitcher: str, home_pitcher: str, score: int, has_odds: bool, has_weather: bool) -> str:
+    q = 45
+    if away_pitcher != "TBD" and home_pitcher != "TBD": q += 25
+    if score >= 80: q += 10
+    if has_odds: q += 12
+    if has_weather: q += 8
+    return f"{min(q, 98)}%"
 
 def live_under_score(total_runs: int, inning: int, outs: int, runners: List[str], status: str) -> Tuple[int, List[str]]:
     if "in progress" not in (status or "").lower():
@@ -206,7 +254,7 @@ def live_under_score(total_runs: int, inning: int, outs: int, runners: List[str]
         reasons.append("Bases trống")
     return max(0, min(100, score)), reasons
 
-def pregame_under_score(g: Dict[str, Any]) -> Tuple[int, List[str]]:
+def pregame_under_score(g: Dict[str, Any], weather_edge: int, umpire_edge: int, odds_edge: int) -> Tuple[int, List[str]]:
     status = g.get("status", {}).get("detailedState", "")
     s = (status or "").lower()
     if "scheduled" not in s and "pre-game" not in s and "warmup" not in s:
@@ -245,12 +293,19 @@ def pregame_under_score(g: Dict[str, Any]) -> Tuple[int, List[str]]:
     elif park < 0:
         score += park; reasons.append(f"Sân dễ Over {park}")
 
+    if weather_edge:
+        score += weather_edge; reasons.append(f"Weather edge +{weather_edge}")
+    if umpire_edge:
+        score += umpire_edge; reasons.append(f"Umpire edge +{umpire_edge}")
+    if odds_edge:
+        score += odds_edge; reasons.append(f"Odds/line edge +{odds_edge}")
+
     if 0 <= hours_to_start <= 4:
         score += 6; reasons.append("Gần giờ thi đấu, nên kiểm tra line")
     else:
         score += 2; reasons.append("Watchlist trước giờ")
 
-    reasons.append("Cần kiểm tra thêm total line, lineup, weather")
+    reasons.append("Cần kiểm tra thêm total line, lineup, weather thật")
     return max(0, min(100, score)), reasons
 
 def parse_game(g: Dict[str, Any]) -> Dict[str, Any]:
@@ -268,32 +323,44 @@ def parse_game(g: Dict[str, Any]) -> Dict[str, Any]:
     half = ls.get("inningHalf", "") or ""
     outs = ls.get("outs", 0) or 0
 
+    away_team = away.get("team", {}).get("name", "Away")
+    home_team = home.get("team", {}).get("name", "Home")
     away_pitcher = away.get("probablePitcher", {}).get("fullName", "TBD")
     home_pitcher = home.get("probablePitcher", {}).get("fullName", "TBD")
 
+    odds = odds_snapshot(away_team, home_team, 0)
+    weather = weather_snapshot(home_team)
+    umpire = umpire_snapshot()
+
     live_score, live_reasons = live_under_score(total, inning, outs, runners, status)
-    pre_score, pre_reasons = pregame_under_score(g)
+    pre_score, pre_reasons = pregame_under_score(g, weather["edge"], umpire["edge"], odds["edge"])
+
     live_stars, live_rec, live_class = rec(live_score)
     pre_stars, pre_rec, pre_class = rec(pre_score)
+    live_ev = estimated_ev(live_score, odds["edge"], weather["edge"])
+    pre_ev = estimated_ev(pre_score, odds["edge"], weather["edge"])
     best_score = max(live_score, pre_score)
     best_mode = "Live" if live_score >= pre_score else "Pregame"
 
+    has_odds = bool(ODDS_API_KEY)
+    has_weather = bool(WEATHER_API_KEY)
+
     return {
         "game_pk": g.get("gamePk"),
-        "away": away.get("team", {}).get("name", "Away"),
-        "home": home.get("team", {}).get("name", "Home"),
+        "away": away_team, "home": home_team,
         "away_pitcher": away_pitcher, "home_pitcher": home_pitcher,
         "away_runs": away_runs, "home_runs": home_runs, "total_runs": total,
         "inning": inning_text(half, inning), "outs": outs, "runners": runner_vi(runners),
         "status_vi": status_vi(status),
+        "odds": odds, "weather": weather, "umpire": umpire,
         "live_score": live_score, "live_reasons": live_reasons, "live_rec": live_rec, "live_class": live_class, "live_stars": live_stars,
-        "live_conf": confidence(live_score), "live_ev": estimated_ev(live_score), "live_ev_class": ev_class(estimated_ev(live_score)),
+        "live_conf": confidence(live_score), "live_ev": live_ev, "live_ev_class": ev_class(live_ev),
         "live_line": recommended_line(live_score, "live"),
         "pregame_score": pre_score, "pregame_reasons": pre_reasons, "pregame_rec": pre_rec, "pregame_class": pre_class, "pregame_stars": pre_stars,
-        "pregame_conf": confidence(pre_score), "pregame_ev": estimated_ev(pre_score), "pregame_ev_class": ev_class(estimated_ev(pre_score)),
+        "pregame_conf": confidence(pre_score), "pregame_ev": pre_ev, "pregame_ev_class": ev_class(pre_ev),
         "pregame_line": recommended_line(pre_score, "pregame"),
         "best_score": best_score, "best_conf": confidence(best_score), "best_mode": best_mode,
-        "quality": data_quality(away_pitcher, home_pitcher, best_score),
+        "quality": data_quality(away_pitcher, home_pitcher, best_score, has_odds, has_weather),
     }
 
 def refresh_games() -> List[Dict[str, Any]]:
@@ -312,36 +379,33 @@ def best_bet():
     games = filtered_games()
     return games[0] if games else None
 
-def live_alert_message(g: Dict[str, Any]) -> str:
-    return (
-        f"🚨 <b>LIVE UNDER ALERT</b>\n"
-        f"<b>{g['away']}</b> {g['away_runs']} - {g['home_runs']} <b>{g['home']}</b>\n"
-        f"Inning: {g['inning']} | Outs: {g['outs']} | Runners: {g['runners']}\n"
-        f"Live Under Score: <b>{g['live_score']}/100</b> {g['live_stars']}\n"
-        f"Confidence: <b>{g['live_conf']}%</b> | EV est: <b>{g['live_ev']}%</b>\n"
-        f"Khuyến nghị: <b>{g['live_rec']}</b>\n"
-        f"Line nên kiểm tra: {g['live_line']}\n"
-        f"Lý do: {'; '.join(g['live_reasons'])}\n\n"
-        f"⚠️ Kiểm tra live total/odds trước khi vào."
-    )
+def telegram_alert(g: Dict[str, Any], mode: str) -> str:
+    if mode == "live":
+        score, stars, conf, ev, rec_text, line, reasons = g["live_score"], g["live_stars"], g["live_conf"], g["live_ev"], g["live_rec"], g["live_line"], g["live_reasons"]
+        title = "🚨 LIVE UNDER ALERT"
+    else:
+        score, stars, conf, ev, rec_text, line, reasons = g["pregame_score"], g["pregame_stars"], g["pregame_conf"], g["pregame_ev"], g["pregame_rec"], g["pregame_line"], g["pregame_reasons"]
+        title = "⚾ PREGAME UNDER WATCH"
 
-def pregame_alert_message(g: Dict[str, Any]) -> str:
     return (
-        f"⚾ <b>PREGAME UNDER WATCH</b>\n"
+        f"{title}\n"
         f"<b>{g['away']}</b> vs <b>{g['home']}</b>\n"
+        f"Score: <b>{score}/100</b> {stars}\n"
+        f"Confidence: <b>{conf}%</b> | EV est: <b>{ev}%</b>\n"
+        f"Khuyến nghị: <b>{rec_text}</b>\n"
+        f"Line nên kiểm tra: {line}\n"
         f"Pitchers: {g['away_pitcher']} vs {g['home_pitcher']}\n"
-        f"Pregame Under Score: <b>{g['pregame_score']}/100</b> {g['pregame_stars']}\n"
-        f"Confidence: <b>{g['pregame_conf']}%</b> | EV est: <b>{g['pregame_ev']}%</b>\n"
-        f"Khuyến nghị: <b>{g['pregame_rec']}</b>\n"
-        f"Line nên kiểm tra: {g['pregame_line']}\n"
-        f"Lý do: {'; '.join(g['pregame_reasons'])}\n\n"
-        f"⚠️ Đây là watchlist. Kiểm tra total line, lineup, weather trước khi bet."
+        f"Odds: {g['odds']['movement']}\n"
+        f"Weather: {g['weather']['impact']}\n"
+        f"Umpire: {g['umpire']['name']}\n"
+        f"Lý do: {'; '.join(reasons)}\n\n"
+        f"⚠️ Luôn kiểm tra sportsbook trước khi bet."
     )
 
 def bot_loop():
     global bot_running
-    print("MLB Under Pro v7 loop started")
-    send_telegram("✅ MLB Under Pro v7 đã chạy. Có Best Bet, EV estimate, Confidence và lọc tín hiệu.")
+    print("MLB Under Pro v8 loop started")
+    send_telegram("✅ MLB Under Pro v8 đã chạy. Có Odds/Weather/Umpire slots, EV estimate và Best Bet.")
     while bot_running:
         try:
             games = refresh_games()
@@ -349,9 +413,9 @@ def bot_loop():
                 live_key = f"live-{g['game_pk']}-{g['inning']}-{g['total_runs']}-{g['outs']}-{g['runners']}"
                 pre_key = f"pre-{g['game_pk']}"
                 if g["live_score"] >= LIVE_ALERT_SCORE and g["live_ev"] >= 2 and live_key not in alerted:
-                    send_telegram(live_alert_message(g)); alerted.add(live_key)
+                    send_telegram(telegram_alert(g, "live")); alerted.add(live_key)
                 if g["pregame_score"] >= PREGAME_ALERT_SCORE and g["pregame_ev"] >= 1 and pre_key not in alerted:
-                    send_telegram(pregame_alert_message(g)); alerted.add(pre_key)
+                    send_telegram(telegram_alert(g, "pregame")); alerted.add(pre_key)
         except Exception as e:
             print("BOT ERROR:", repr(e))
         time.sleep(CHECK_EVERY_SECONDS)
@@ -369,26 +433,26 @@ HTML = """<!doctype html>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MLB Under Pro v7</title>
+<title>MLB Under Pro v8</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,Arial;margin:0;background:#06111f;color:white}
 .header{padding:18px;background:#08101e;position:sticky;top:0;z-index:10;border-bottom:1px solid #1f3b57}
 h1{margin:0;font-size:25px}.small{color:#d4e4f5;font-size:14px}
 .card,.topbox,.footer,.best{margin:12px;padding:15px;border-radius:16px;background:#0d2138;border:1px solid #21496f}
 .best{background:#102814;border-color:#22c55e}
-.teams{font-size:19px;font-weight:800}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.teams{font-size:19px;font-weight:800}.grid{display:grid;grid-template-columns:1fr;gap:10px}.mini{display:grid;grid-template-columns:1fr;gap:8px}
 .score{font-size:24px;font-weight:900;margin-top:8px}
 .elite{color:#22c55e}.strong{color:#4ade80}.watch{color:#facc15}.wait{color:#fb923c}.avoid{color:#fb7185}
 .btn{display:inline-block;margin-top:10px;margin-right:6px;background:#38bdf8;color:#001;padding:10px 14px;border-radius:12px;text-decoration:none;font-weight:800;border:0}
 .stop{background:#fb7185;color:#111827}.start{background:#22c55e;color:#111827}
 .reason{margin-top:5px;color:#e5f2ff}.box{padding:10px;border-radius:12px;background:#091a2d;border:1px solid #1f3b57}
 .badge{display:inline-block;margin-top:5px;margin-right:5px;padding:4px 8px;border-radius:999px;background:#102d4d}
-@media(min-width:800px){.grid{grid-template-columns:1fr 1fr}}
+@media(min-width:800px){.grid{grid-template-columns:1fr 1fr}.mini{grid-template-columns:1fr 1fr 1fr}}
 </style>
 </head>
 <body>
 <div class="header">
-<h1>⚾ MLB Under Pro v7</h1>
+<h1>⚾ MLB Under Pro v8</h1>
 <div class="small">Bot: {{ "ĐANG CHẠY 🟢" if running else "ĐANG DỪNG 🔴" }} | Cập nhật: {{last_update}}</div>
 <div class="small">Live Alert: {{live_alert}}+ | Pregame Alert: {{pregame_alert}}+ | Ẩn game dưới {{min_display}}</div>
 <form method="post" action="/start" style="display:inline"><button class="btn start">▶ Start Bot</button></form>
@@ -420,6 +484,13 @@ Data quality: {{best.quality}}
  <div class="small">{{g.status_vi}} | {{g.inning}} | Outs: {{g.outs}} | {{g.runners}}</div>
  <div class="small">Pitchers: {{g.away_pitcher}} vs {{g.home_pitcher}} | Data quality: {{g.quality}}</div>
  <div class="small">Tổng điểm hiện tại: {{g.total_runs}}</div>
+
+ <div class="mini">
+   <div class="box"><b>📈 Odds</b><br>Opening: {{g.odds.opening_total}}<br>Current: {{g.odds.current_total}}<br>{{g.odds.movement}}<br>{{g.odds.sharp}}</div>
+   <div class="box"><b>🌦 Weather</b><br>Wind: {{g.weather.wind}}<br>Temp: {{g.weather.temp}}<br>Roof: {{g.weather.roof}}<br>{{g.weather.impact}}</div>
+   <div class="box"><b>👨‍⚖️ Umpire</b><br>{{g.umpire.name}}<br>Under %: {{g.umpire.under_pct}}</div>
+ </div>
+
  <div class="grid">
    <div class="box">
      <div class="score {{g.live_class}}">Live Under: {{g.live_score}}/100 {{g.live_stars}}</div>
@@ -440,13 +511,11 @@ Data quality: {{best.quality}}
 {% endfor %}
 
 <div class="footer">
-<b>V7 có gì mới:</b><br>
-• Best Bet of the Day<br>
-• EV estimate để lọc tín hiệu yếu<br>
-• Data quality %<br>
-• Line nên kiểm tra<br>
-• Telegram chỉ gửi khi Score + EV đủ điều kiện<br><br>
-Lưu ý: EV và line hiện là ước tính vì chưa gắn Odds API thật. Luôn kiểm tra sportsbook trước khi bet.
+<b>V8 có gì mới:</b><br>
+• Thêm khung Odds, Weather, Umpire để sẵn sàng gắn API thật<br>
+• EV estimate có tính thêm odds/weather edge khi có dữ liệu<br>
+• Telegram alert gom Score + Confidence + EV + Odds + Weather<br><br>
+Lưu ý: nếu chưa thêm ODDS_API_KEY và WEATHER_API_KEY trong Render Environment thì các ô này sẽ hiện placeholder.
 </div>
 </body>
 </html>"""
@@ -479,7 +548,7 @@ def refresh():
 
 @app.route("/test")
 def test():
-    ok = send_telegram("✅ Test thành công: MLB Under Pro v7 đã kết nối Telegram.")
+    ok = send_telegram("✅ Test thành công: MLB Under Pro v8 đã kết nối Telegram.")
     return Response("Telegram sent ✅" if ok else "Telegram failed ❌. Kiểm tra TELEGRAM_BOT_TOKEN và TELEGRAM_CHAT_ID.", status=200 if ok else 500, content_type="text/plain; charset=utf-8")
 
 @app.route("/api/games")
