@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MLB Edge AI Pro v19 Ultimate SunWukong
+MLB Edge AI Pro v19 Ultimate 
 Final version:
 - Pregame UNDER / OVER / PASS
 - Live UNDER / LIVE OVER / PASS
