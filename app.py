@@ -14,7 +14,9 @@ MIN_DISPLAY_SCORE = int(os.getenv("MIN_DISPLAY_SCORE", "70"))
 PREGAME_WINDOW_HOURS = int(os.getenv("PREGAME_WINDOW_HOURS", "24"))
 AUTO_START = os.getenv("AUTO_START", "1") == "1"
 
-# Optional API keys for future real data.
+BANKROLL = float(os.getenv("BANKROLL", "1000"))
+MAX_KELLY_PCT = float(os.getenv("MAX_KELLY_PCT", "2.5"))
+
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
 
@@ -24,7 +26,7 @@ app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
 
 latest_games: List[Dict[str, Any]] = []
-last_update = "Chưa cập nhật"
+last_update = "ChÆ°a cáº­p nháº­t"
 alerted: Set[str] = set()
 bot_running = False
 bot_thread = None
@@ -49,11 +51,6 @@ PARK_UNDER_EDGE = {
 PARK_OVER_PENALTY = {
     "Colorado Rockies": -10, "Cincinnati Reds": -4, "Boston Red Sox": -3,
     "Philadelphia Phillies": -2, "New York Yankees": -2, "Texas Rangers": -1,
-}
-
-UMPIRE_UNDER_EDGE = {
-    # Placeholder pool until real umpire data is connected.
-    "Unknown": 0,
 }
 
 def today() -> str:
@@ -99,11 +96,11 @@ def fetch_mlb_games() -> List[Dict[str, Any]]:
 
 def status_vi(status: str) -> str:
     s = (status or "").lower()
-    if "in progress" in s: return "Đang live"
-    if "scheduled" in s: return "Chưa bắt đầu"
-    if "pre-game" in s or "warmup" in s: return "Sắp bắt đầu"
-    if "final" in s: return "Đã kết thúc"
-    return status or "Không rõ"
+    if "in progress" in s: return "Äang live"
+    if "scheduled" in s: return "ChÆ°a báº¯t Äáº§u"
+    if "pre-game" in s or "warmup" in s: return "Sáº¯p báº¯t Äáº§u"
+    if "final" in s: return "ÄÃ£ káº¿t thÃºc"
+    return status or "KhÃ´ng rÃµ"
 
 def inning_text(half: str, inning: int) -> str:
     if not inning: return "Pregame"
@@ -112,7 +109,7 @@ def inning_text(half: str, inning: int) -> str:
     return f"Inning {inning}"
 
 def runner_vi(runners: List[str]) -> str:
-    if not runners: return "Bases trống"
+    if not runners: return "Bases trá»ng"
     mapping = {"first": "1B", "second": "2B", "third": "3B"}
     return ", ".join(mapping.get(r, r) for r in runners)
 
@@ -132,21 +129,21 @@ def pitcher_bonus(name: str) -> int:
 def park_adjust(home_team: str) -> int:
     return PARK_UNDER_EDGE.get(home_team or "", 0) + PARK_OVER_PENALTY.get(home_team or "", 0)
 
-def rec(score: int) -> Tuple[str, str, str]:
-    if score >= 94: return "⭐⭐⭐⭐⭐", "🔥 BEST BET", "elite"
-    if score >= 88: return "⭐⭐⭐⭐", "✅ RẤT ĐẸP", "strong"
-    if score >= 80: return "⭐⭐⭐", "👀 WATCHLIST", "watch"
-    if score >= 70: return "⭐⭐", "⏳ CHỜ THÊM", "wait"
-    return "⭐", "❌ BỎ QUA", "avoid"
+def rec(score: int) -> Tuple[str, str, str, str]:
+    if score >= 94: return "A+", "â­â­â­â­â­", "ð¥ BEST BET", "elite"
+    if score >= 88: return "A", "â­â­â­â­", "â Ráº¤T Äáº¸P", "strong"
+    if score >= 80: return "B+", "â­â­â­", "ð WATCHLIST", "watch"
+    if score >= 70: return "B", "â­â­", "â³ CHá» THÃM", "wait"
+    return "C", "â­", "â Bá» QUA", "avoid"
 
 def confidence(score: int) -> int:
     if score <= 0: return 0
     return max(35, min(98, int(score * 0.9 + 10)))
 
-def estimated_ev(score: int, odds_edge: int = 0, weather_edge: int = 0) -> float:
+def estimated_ev(score: int, odds_edge: int = 0, weather_edge: int = 0, lineup_edge: int = 0, bullpen_edge: int = 0) -> float:
     if score < 70:
         return -4.0
-    return round((score - 78) * 0.65 + odds_edge * 0.35 + weather_edge * 0.25, 1)
+    return round((score - 78) * 0.65 + odds_edge * 0.35 + weather_edge * 0.25 + lineup_edge * 0.25 + bullpen_edge * 0.25, 1)
 
 def ev_class(ev: float) -> str:
     if ev >= 8: return "elite"
@@ -154,56 +151,75 @@ def ev_class(ev: float) -> str:
     if ev >= 0: return "watch"
     return "avoid"
 
+def kelly_pct(ev: float, confidence_pct: int) -> float:
+    if ev <= 0 or confidence_pct < 80:
+        return 0.0
+    raw = (ev / 100.0) * (confidence_pct / 100.0) * 22
+    return round(max(0, min(MAX_KELLY_PCT, raw)), 2)
+
+def stake_amount(kelly: float) -> float:
+    return round(BANKROLL * kelly / 100.0, 2)
+
 def recommended_line(score: int, mode: str) -> str:
     if mode == "live":
-        if score >= 94: return "Under live nếu line còn 7.5+"
-        if score >= 88: return "Under live nếu line còn 8 / 7.5"
-        if score >= 80: return "Chỉ theo dõi, chưa vội vào"
-        return "Không vào live lúc này"
+        if score >= 94: return "Under live náº¿u line cÃ²n 7.5+"
+        if score >= 88: return "Under live náº¿u line cÃ²n 8 / 7.5"
+        if score >= 80: return "Chá» theo dÃµi, chÆ°a vá»i vÃ o"
+        return "KhÃ´ng vÃ o live lÃºc nÃ y"
     else:
-        if score >= 94: return "Pregame Under 8.5+ rất đáng kiểm tra"
-        if score >= 88: return "Pregame Under 8 / 8.5 nếu odds ổn"
-        if score >= 80: return "Watchlist, chờ line tốt hơn"
-        return "Không ưu tiên pregame"
+        if score >= 94: return "Pregame Under 8.5+ ráº¥t ÄÃ¡ng kiá»m tra"
+        if score >= 88: return "Pregame Under 8 / 8.5 náº¿u odds á»n"
+        if score >= 80: return "Watchlist, chá» line tá»t hÆ¡n"
+        return "KhÃ´ng Æ°u tiÃªn pregame"
 
-def odds_snapshot(away: str, home: str, score: int) -> Dict[str, Any]:
-    # V8 supports optional ODDS_API_KEY, but no paid API is required to run.
-    # Until the key/provider is connected, this returns a clear placeholder.
+def odds_snapshot() -> Dict[str, Any]:
     if not ODDS_API_KEY:
         return {
-            "opening_total": "Chưa gắn Odds API",
-            "current_total": "Chưa gắn Odds API",
-            "movement": "Chưa có line movement",
-            "sharp": "Chờ dữ liệu odds thật",
+            "opening_total": "ChÆ°a gáº¯n Odds API",
+            "current_total": "ChÆ°a gáº¯n Odds API",
+            "movement": "ChÆ°a cÃ³ line movement",
+            "sharp": "Chá» dá»¯ liá»u odds tháº­t",
             "edge": 0,
         }
-
-    # Safe placeholder for future integration.
     return {
-        "opening_total": "Đã có ODDS_API_KEY",
-        "current_total": "Cần map provider",
-        "movement": "Đang chờ tích hợp endpoint",
-        "sharp": "Chưa đủ dữ liệu",
+        "opening_total": "ÄÃ£ cÃ³ ODDS_API_KEY",
+        "current_total": "Cáº§n map provider",
+        "movement": "Äang chá» tÃ­ch há»£p endpoint",
+        "sharp": "ChÆ°a Äá»§ dá»¯ liá»u",
         "edge": 0,
     }
 
 def weather_snapshot(home_team: str) -> Dict[str, Any]:
-    # Placeholder until stadium coordinates + weather provider are added.
     edge = 0
     if home_team in PARK_UNDER_EDGE:
         edge += 1
     return {
-        "wind": "Chưa gắn Weather API",
-        "temp": "Chưa có",
-        "roof": "Chưa có",
-        "impact": f"Park/weather edge tạm tính: +{edge}" if edge else "Chưa có weather edge",
+        "wind": "ChÆ°a gáº¯n Weather API",
+        "temp": "ChÆ°a cÃ³",
+        "roof": "ChÆ°a cÃ³",
+        "impact": f"Park/weather edge táº¡m tÃ­nh: +{edge}" if edge else "ChÆ°a cÃ³ weather edge",
         "edge": edge,
     }
 
 def umpire_snapshot() -> Dict[str, Any]:
+    return {"name": "ChÆ°a cÃ³ umpire", "under_pct": "ChÆ°a cÃ³", "edge": 0}
+
+def bullpen_snapshot(away: str, home: str) -> Dict[str, Any]:
+    # Placeholder until team pitching endpoint is added.
+    edge = 0
+    if away in PARK_UNDER_EDGE or home in PARK_UNDER_EDGE:
+        edge += 1
     return {
-        "name": "Chưa có umpire",
-        "under_pct": "Chưa có",
+        "away": "ChÆ°a gáº¯n bullpen API",
+        "home": "ChÆ°a gáº¯n bullpen API",
+        "fatigue": "ChÆ°a cÃ³ bullpen fatigue",
+        "edge": edge,
+    }
+
+def lineup_snapshot() -> Dict[str, Any]:
+    return {
+        "status": "ChÆ°a cÃ³ lineup chÃ­nh thá»©c",
+        "missing_bats": "Chá» lineup",
         "edge": 0,
     }
 
@@ -217,56 +233,56 @@ def data_quality(away_pitcher: str, home_pitcher: str, score: int, has_odds: boo
 
 def live_under_score(total_runs: int, inning: int, outs: int, runners: List[str], status: str) -> Tuple[int, List[str]]:
     if "in progress" not in (status or "").lower():
-        return 0, ["Trận chưa live"]
+        return 0, ["Tráº­n chÆ°a live"]
     score = 50
     reasons = []
     if inning >= 8:
-        score += 30; reasons.append("Cuối trận, thời gian ghi điểm còn ít")
+        score += 30; reasons.append("Cuá»i tráº­n, thá»i gian ghi Äiá»m cÃ²n Ã­t")
     elif inning == 7:
-        score += 25; reasons.append("Inning 7, vùng live Under đẹp")
+        score += 25; reasons.append("Inning 7, vÃ¹ng live Under Äáº¹p")
     elif inning == 6:
-        score += 18; reasons.append("Inning 6, bắt đầu vào vùng live Under")
+        score += 18; reasons.append("Inning 6, báº¯t Äáº§u vÃ o vÃ¹ng live Under")
     elif inning == 5:
-        score += 9; reasons.append("Inning 5, theo dõi")
+        score += 9; reasons.append("Inning 5, theo dÃµi")
     else:
-        score -= 20; reasons.append("Còn sớm, rủi ro cao")
+        score -= 20; reasons.append("CÃ²n sá»m, rá»§i ro cao")
 
     if total_runs <= 3:
-        score += 25; reasons.append("Tổng điểm rất thấp")
+        score += 25; reasons.append("Tá»ng Äiá»m ráº¥t tháº¥p")
     elif total_runs == 4:
-        score += 19; reasons.append("Tổng điểm thấp")
+        score += 19; reasons.append("Tá»ng Äiá»m tháº¥p")
     elif total_runs == 5:
-        score += 12; reasons.append("Tổng điểm tạm ổn")
+        score += 12; reasons.append("Tá»ng Äiá»m táº¡m á»n")
     elif total_runs == 6:
-        score += 3; reasons.append("Tổng điểm trung bình")
+        score += 3; reasons.append("Tá»ng Äiá»m trung bÃ¬nh")
     else:
-        score -= 18; reasons.append("Tổng điểm đã cao")
+        score -= 18; reasons.append("Tá»ng Äiá»m ÄÃ£ cao")
 
     if outs == 2:
-        score += 9; reasons.append("2 outs, giảm rủi ro ghi điểm")
+        score += 9; reasons.append("2 outs, giáº£m rá»§i ro ghi Äiá»m")
     elif outs == 0:
-        score -= 8; reasons.append("0 out, rủi ro cao")
+        score -= 8; reasons.append("0 out, rá»§i ro cao")
 
     p = base_penalty(runners, outs)
     if p:
-        score -= p; reasons.append(f"Có runner trên base, trừ {p} điểm")
+        score -= p; reasons.append(f"CÃ³ runner trÃªn base, trá»« {p} Äiá»m")
     else:
-        reasons.append("Bases trống")
+        reasons.append("Bases trá»ng")
     return max(0, min(100, score)), reasons
 
-def pregame_under_score(g: Dict[str, Any], weather_edge: int, umpire_edge: int, odds_edge: int) -> Tuple[int, List[str]]:
+def pregame_under_score(g: Dict[str, Any], weather_edge: int, umpire_edge: int, odds_edge: int, bullpen_edge: int, lineup_edge: int) -> Tuple[int, List[str]]:
     status = g.get("status", {}).get("detailedState", "")
     s = (status or "").lower()
     if "scheduled" not in s and "pre-game" not in s and "warmup" not in s:
-        return 0, ["Không phải pregame"]
+        return 0, ["KhÃ´ng pháº£i pregame"]
 
     game_dt = parse_game_time(g.get("gameDate", ""))
     if not game_dt:
-        return 55, ["Chưa đọc được giờ thi đấu"]
+        return 55, ["ChÆ°a Äá»c ÄÆ°á»£c giá» thi Äáº¥u"]
 
     hours_to_start = (game_dt - now_utc()).total_seconds() / 3600
-    if hours_to_start < -0.25: return 0, ["Trận đã bắt đầu hoặc đã qua giờ"]
-    if hours_to_start > PREGAME_WINDOW_HOURS: return 45, [f"Còn xa giờ thi đấu: {hours_to_start:.1f} giờ"]
+    if hours_to_start < -0.25: return 0, ["Tráº­n ÄÃ£ báº¯t Äáº§u hoáº·c ÄÃ£ qua giá»"]
+    if hours_to_start > PREGAME_WINDOW_HOURS: return 45, [f"CÃ²n xa giá» thi Äáº¥u: {hours_to_start:.1f} giá»"]
 
     teams = g.get("teams", {})
     away_pitcher = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "")
@@ -274,38 +290,41 @@ def pregame_under_score(g: Dict[str, Any], weather_edge: int, umpire_edge: int, 
     home_team = teams.get("home", {}).get("team", {}).get("name", "")
 
     score = 56
-    reasons = [f"Còn {hours_to_start:.1f} giờ trước khi bóng chạy"]
+    reasons = [f"CÃ²n {hours_to_start:.1f} giá» trÆ°á»c khi bÃ³ng cháº¡y"]
 
     if away_pitcher and home_pitcher:
-        score += 12; reasons.append("Đã có probable pitchers")
+        score += 12; reasons.append("ÄÃ£ cÃ³ probable pitchers")
     else:
-        score -= 10; reasons.append("Thiếu thông tin pitcher")
+        score -= 10; reasons.append("Thiáº¿u thÃ´ng tin pitcher")
 
     pb = pitcher_bonus(away_pitcher) + pitcher_bonus(home_pitcher)
     if pb:
         score += pb; reasons.append(f"Pitcher edge +{pb}")
     else:
-        reasons.append("Pitcher chưa đủ dữ liệu nâng điểm")
+        reasons.append("Pitcher chÆ°a Äá»§ dá»¯ liá»u nÃ¢ng Äiá»m")
 
     park = park_adjust(home_team)
     if park > 0:
-        score += park; reasons.append(f"Sân có xu hướng Under +{park}")
+        score += park; reasons.append(f"SÃ¢n cÃ³ xu hÆ°á»ng Under +{park}")
     elif park < 0:
-        score += park; reasons.append(f"Sân dễ Over {park}")
+        score += park; reasons.append(f"SÃ¢n dá» Over {park}")
 
-    if weather_edge:
-        score += weather_edge; reasons.append(f"Weather edge +{weather_edge}")
-    if umpire_edge:
-        score += umpire_edge; reasons.append(f"Umpire edge +{umpire_edge}")
-    if odds_edge:
-        score += odds_edge; reasons.append(f"Odds/line edge +{odds_edge}")
+    for label, edge in [
+        ("Weather edge", weather_edge),
+        ("Umpire edge", umpire_edge),
+        ("Odds/line edge", odds_edge),
+        ("Bullpen edge", bullpen_edge),
+        ("Lineup edge", lineup_edge),
+    ]:
+        if edge:
+            score += edge; reasons.append(f"{label} +{edge}")
 
     if 0 <= hours_to_start <= 4:
-        score += 6; reasons.append("Gần giờ thi đấu, nên kiểm tra line")
+        score += 6; reasons.append("Gáº§n giá» thi Äáº¥u, nÃªn kiá»m tra line")
     else:
-        score += 2; reasons.append("Watchlist trước giờ")
+        score += 2; reasons.append("Watchlist trÆ°á»c giá»")
 
-    reasons.append("Cần kiểm tra thêm total line, lineup, weather thật")
+    reasons.append("Cáº§n kiá»m tra thÃªm total line, lineup, weather tháº­t")
     return max(0, min(100, score)), reasons
 
 def parse_game(g: Dict[str, Any]) -> Dict[str, Any]:
@@ -328,22 +347,24 @@ def parse_game(g: Dict[str, Any]) -> Dict[str, Any]:
     away_pitcher = away.get("probablePitcher", {}).get("fullName", "TBD")
     home_pitcher = home.get("probablePitcher", {}).get("fullName", "TBD")
 
-    odds = odds_snapshot(away_team, home_team, 0)
+    odds = odds_snapshot()
     weather = weather_snapshot(home_team)
     umpire = umpire_snapshot()
+    bullpen = bullpen_snapshot(away_team, home_team)
+    lineup = lineup_snapshot()
 
     live_score, live_reasons = live_under_score(total, inning, outs, runners, status)
-    pre_score, pre_reasons = pregame_under_score(g, weather["edge"], umpire["edge"], odds["edge"])
+    pre_score, pre_reasons = pregame_under_score(g, weather["edge"], umpire["edge"], odds["edge"], bullpen["edge"], lineup["edge"])
 
-    live_stars, live_rec, live_class = rec(live_score)
-    pre_stars, pre_rec, pre_class = rec(pre_score)
-    live_ev = estimated_ev(live_score, odds["edge"], weather["edge"])
-    pre_ev = estimated_ev(pre_score, odds["edge"], weather["edge"])
+    live_grade, live_stars, live_rec, live_class = rec(live_score)
+    pre_grade, pre_stars, pre_rec, pre_class = rec(pre_score)
+    live_ev = estimated_ev(live_score, odds["edge"], weather["edge"], lineup["edge"], bullpen["edge"])
+    pre_ev = estimated_ev(pre_score, odds["edge"], weather["edge"], lineup["edge"], bullpen["edge"])
     best_score = max(live_score, pre_score)
     best_mode = "Live" if live_score >= pre_score else "Pregame"
-
-    has_odds = bool(ODDS_API_KEY)
-    has_weather = bool(WEATHER_API_KEY)
+    best_conf = confidence(best_score)
+    best_ev = live_ev if best_mode == "Live" else pre_ev
+    best_kelly = kelly_pct(best_ev, best_conf)
 
     return {
         "game_pk": g.get("gamePk"),
@@ -352,15 +373,15 @@ def parse_game(g: Dict[str, Any]) -> Dict[str, Any]:
         "away_runs": away_runs, "home_runs": home_runs, "total_runs": total,
         "inning": inning_text(half, inning), "outs": outs, "runners": runner_vi(runners),
         "status_vi": status_vi(status),
-        "odds": odds, "weather": weather, "umpire": umpire,
-        "live_score": live_score, "live_reasons": live_reasons, "live_rec": live_rec, "live_class": live_class, "live_stars": live_stars,
+        "odds": odds, "weather": weather, "umpire": umpire, "bullpen": bullpen, "lineup": lineup,
+        "live_score": live_score, "live_reasons": live_reasons, "live_rec": live_rec, "live_class": live_class, "live_stars": live_stars, "live_grade": live_grade,
         "live_conf": confidence(live_score), "live_ev": live_ev, "live_ev_class": ev_class(live_ev),
-        "live_line": recommended_line(live_score, "live"),
-        "pregame_score": pre_score, "pregame_reasons": pre_reasons, "pregame_rec": pre_rec, "pregame_class": pre_class, "pregame_stars": pre_stars,
+        "live_line": recommended_line(live_score, "live"), "live_kelly": kelly_pct(live_ev, confidence(live_score)), "live_stake": stake_amount(kelly_pct(live_ev, confidence(live_score))),
+        "pregame_score": pre_score, "pregame_reasons": pre_reasons, "pregame_rec": pre_rec, "pregame_class": pre_class, "pregame_stars": pre_stars, "pregame_grade": pre_grade,
         "pregame_conf": confidence(pre_score), "pregame_ev": pre_ev, "pregame_ev_class": ev_class(pre_ev),
-        "pregame_line": recommended_line(pre_score, "pregame"),
-        "best_score": best_score, "best_conf": confidence(best_score), "best_mode": best_mode,
-        "quality": data_quality(away_pitcher, home_pitcher, best_score, has_odds, has_weather),
+        "pregame_line": recommended_line(pre_score, "pregame"), "pregame_kelly": kelly_pct(pre_ev, confidence(pre_score)), "pregame_stake": stake_amount(kelly_pct(pre_ev, confidence(pre_score))),
+        "best_score": best_score, "best_conf": best_conf, "best_mode": best_mode, "best_ev": best_ev, "best_kelly": best_kelly, "best_stake": stake_amount(best_kelly),
+        "quality": data_quality(away_pitcher, home_pitcher, best_score, bool(ODDS_API_KEY), bool(WEATHER_API_KEY)),
     }
 
 def refresh_games() -> List[Dict[str, Any]]:
@@ -381,31 +402,34 @@ def best_bet():
 
 def telegram_alert(g: Dict[str, Any], mode: str) -> str:
     if mode == "live":
-        score, stars, conf, ev, rec_text, line, reasons = g["live_score"], g["live_stars"], g["live_conf"], g["live_ev"], g["live_rec"], g["live_line"], g["live_reasons"]
-        title = "🚨 LIVE UNDER ALERT"
+        score, stars, conf, ev, rec_text, line, reasons, kelly, stake = g["live_score"], g["live_stars"], g["live_conf"], g["live_ev"], g["live_rec"], g["live_line"], g["live_reasons"], g["live_kelly"], g["live_stake"]
+        title = "ð¨ LIVE UNDER ALERT"
     else:
-        score, stars, conf, ev, rec_text, line, reasons = g["pregame_score"], g["pregame_stars"], g["pregame_conf"], g["pregame_ev"], g["pregame_rec"], g["pregame_line"], g["pregame_reasons"]
-        title = "⚾ PREGAME UNDER WATCH"
+        score, stars, conf, ev, rec_text, line, reasons, kelly, stake = g["pregame_score"], g["pregame_stars"], g["pregame_conf"], g["pregame_ev"], g["pregame_rec"], g["pregame_line"], g["pregame_reasons"], g["pregame_kelly"], g["pregame_stake"]
+        title = "â¾ PREGAME UNDER WATCH"
 
     return (
         f"{title}\n"
         f"<b>{g['away']}</b> vs <b>{g['home']}</b>\n"
         f"Score: <b>{score}/100</b> {stars}\n"
         f"Confidence: <b>{conf}%</b> | EV est: <b>{ev}%</b>\n"
-        f"Khuyến nghị: <b>{rec_text}</b>\n"
-        f"Line nên kiểm tra: {line}\n"
+        f"Kelly gá»£i Ã½: <b>{kelly}%</b> â <b>${stake}</b> náº¿u bankroll ${BANKROLL:.0f}\n"
+        f"Khuyáº¿n nghá»: <b>{rec_text}</b>\n"
+        f"Line nÃªn kiá»m tra: {line}\n"
         f"Pitchers: {g['away_pitcher']} vs {g['home_pitcher']}\n"
         f"Odds: {g['odds']['movement']}\n"
         f"Weather: {g['weather']['impact']}\n"
         f"Umpire: {g['umpire']['name']}\n"
-        f"Lý do: {'; '.join(reasons)}\n\n"
-        f"⚠️ Luôn kiểm tra sportsbook trước khi bet."
+        f"Bullpen: {g['bullpen']['fatigue']}\n"
+        f"Lineup: {g['lineup']['status']}\n"
+        f"LÃ½ do: {'; '.join(reasons)}\n\n"
+        f"â ï¸ LuÃ´n kiá»m tra sportsbook trÆ°á»c khi bet."
     )
 
 def bot_loop():
     global bot_running
-    print("MLB Under Pro v8 loop started")
-    send_telegram("✅ MLB Under Pro v8 đã chạy. Có Odds/Weather/Umpire slots, EV estimate và Best Bet.")
+    print("MLB Under Pro v9 loop started")
+    send_telegram("â MLB Under Pro v9 ÄÃ£ cháº¡y. CÃ³ Kelly stake, EV, Bullpen/Lineup slots vÃ  Best Bet.")
     while bot_running:
         try:
             games = refresh_games()
@@ -433,7 +457,7 @@ HTML = """<!doctype html>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MLB Under Pro v8</title>
+<title>MLB Under Pro v9</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,Arial;margin:0;background:#06111f;color:white}
 .header{padding:18px;background:#08101e;position:sticky;top:0;z-index:10;border-bottom:1px solid #1f3b57}
@@ -452,29 +476,30 @@ h1{margin:0;font-size:25px}.small{color:#d4e4f5;font-size:14px}
 </head>
 <body>
 <div class="header">
-<h1>⚾ MLB Under Pro v8</h1>
-<div class="small">Bot: {{ "ĐANG CHẠY 🟢" if running else "ĐANG DỪNG 🔴" }} | Cập nhật: {{last_update}}</div>
-<div class="small">Live Alert: {{live_alert}}+ | Pregame Alert: {{pregame_alert}}+ | Ẩn game dưới {{min_display}}</div>
-<form method="post" action="/start" style="display:inline"><button class="btn start">▶ Start Bot</button></form>
-<form method="post" action="/stop" style="display:inline"><button class="btn stop">■ Stop Bot</button></form>
-<a class="btn" href="/refresh">↻ Refresh</a>
+<h1>â¾ MLB Under Pro v9</h1>
+<div class="small">Bot: {{ "ÄANG CHáº Y ð¢" if running else "ÄANG Dá»ªNG ð´" }} | Cáº­p nháº­t: {{last_update}}</div>
+<div class="small">Live Alert: {{live_alert}}+ | Pregame Alert: {{pregame_alert}}+ | áº¨n game dÆ°á»i {{min_display}} | Bankroll: ${{bankroll}}</div>
+<form method="post" action="/start" style="display:inline"><button class="btn start">â¶ Start Bot</button></form>
+<form method="post" action="/stop" style="display:inline"><button class="btn stop">â  Stop Bot</button></form>
+<a class="btn" href="/refresh">â» Refresh</a>
 <a class="btn" href="/test">Test Telegram</a>
 </div>
 
 {% if best %}
 <div class="best">
-<b>🔥 BEST BET OF THE DAY</b><br>
+<b>ð¥ BEST BET OF THE DAY</b><br>
 <div class="teams">{{best.away}} vs {{best.home}}</div>
-Best Mode: <b>{{best.best_mode}}</b> | Score: <b>{{best.best_score}}/100</b> | Confidence: <b>{{best.best_conf}}%</b><br>
+Best Mode: <b>{{best.best_mode}}</b> | Score: <b>{{best.best_score}}/100</b> | Confidence: <b>{{best.best_conf}}%</b> | EV: <b>{{best.best_ev}}%</b><br>
+Kelly gá»£i Ã½: <b>{{best.best_kelly}}%</b> â <b>${{best.best_stake}}</b><br>
 Pitchers: {{best.away_pitcher}} vs {{best.home_pitcher}}<br>
 Data quality: {{best.quality}}
 </div>
 {% endif %}
 
 <div class="topbox">
-<b>🏆 Top kèo Under đẹp nhất</b><br>
+<b>ð Top kÃ¨o Under Äáº¹p nháº¥t</b><br>
 {% for g in games[:5] %}
-{{loop.index}}. {{g.away}} vs {{g.home}} — {{g.best_mode}} — <b>{{g.best_score}}/100</b> — Confidence: <b>{{g.best_conf}}%</b><br>
+{{loop.index}}. {{g.away}} vs {{g.home}} â {{g.best_mode}} â <b>{{g.best_score}}/100</b> â Conf <b>{{g.best_conf}}%</b> â EV <b>{{g.best_ev}}%</b> â Kelly <b>{{g.best_kelly}}%</b><br>
 {% endfor %}
 </div>
 
@@ -483,39 +508,45 @@ Data quality: {{best.quality}}
  <div class="teams">{{g.away}} {{g.away_runs}} - {{g.home_runs}} {{g.home}}</div>
  <div class="small">{{g.status_vi}} | {{g.inning}} | Outs: {{g.outs}} | {{g.runners}}</div>
  <div class="small">Pitchers: {{g.away_pitcher}} vs {{g.home_pitcher}} | Data quality: {{g.quality}}</div>
- <div class="small">Tổng điểm hiện tại: {{g.total_runs}}</div>
+ <div class="small">Tá»ng Äiá»m hiá»n táº¡i: {{g.total_runs}}</div>
 
  <div class="mini">
-   <div class="box"><b>📈 Odds</b><br>Opening: {{g.odds.opening_total}}<br>Current: {{g.odds.current_total}}<br>{{g.odds.movement}}<br>{{g.odds.sharp}}</div>
-   <div class="box"><b>🌦 Weather</b><br>Wind: {{g.weather.wind}}<br>Temp: {{g.weather.temp}}<br>Roof: {{g.weather.roof}}<br>{{g.weather.impact}}</div>
-   <div class="box"><b>👨‍⚖️ Umpire</b><br>{{g.umpire.name}}<br>Under %: {{g.umpire.under_pct}}</div>
+   <div class="box"><b>ð Odds</b><br>Opening: {{g.odds.opening_total}}<br>Current: {{g.odds.current_total}}<br>{{g.odds.movement}}<br>{{g.odds.sharp}}</div>
+   <div class="box"><b>ð¦ Weather</b><br>Wind: {{g.weather.wind}}<br>Temp: {{g.weather.temp}}<br>Roof: {{g.weather.roof}}<br>{{g.weather.impact}}</div>
+   <div class="box"><b>ð¨ââï¸ Umpire</b><br>{{g.umpire.name}}<br>Under %: {{g.umpire.under_pct}}</div>
+ </div>
+ <div class="mini">
+   <div class="box"><b>ðª Bullpen</b><br>Away: {{g.bullpen.away}}<br>Home: {{g.bullpen.home}}<br>{{g.bullpen.fatigue}}</div>
+   <div class="box"><b>ð¥ Lineup</b><br>{{g.lineup.status}}<br>{{g.lineup.missing_bats}}</div>
+   <div class="box"><b>ðµ Bankroll</b><br>Bankroll: ${{bankroll}}<br>Max Kelly: {{max_kelly}}%</div>
  </div>
 
  <div class="grid">
    <div class="box">
-     <div class="score {{g.live_class}}">Live Under: {{g.live_score}}/100 {{g.live_stars}}</div>
+     <div class="score {{g.live_class}}">Live Under: {{g.live_score}}/100 {{g.live_stars}} {{g.live_grade}}</div>
      <div class="{{g.live_class}}"><b>{{g.live_rec}}</b></div>
-     <div><span class="badge">Confidence: {{g.live_conf}}%</span><span class="badge {{g.live_ev_class}}">EV est: {{g.live_ev}}%</span></div>
-     <div class="reason">Line nên kiểm tra: {{g.live_line}}</div>
-     <div class="reason">Lý do live: {{ "; ".join(g.live_reasons) }}</div>
+     <div><span class="badge">Confidence: {{g.live_conf}}%</span><span class="badge {{g.live_ev_class}}">EV est: {{g.live_ev}}%</span><span class="badge">Kelly: {{g.live_kelly}}% â ${{g.live_stake}}</span></div>
+     <div class="reason">Line nÃªn kiá»m tra: {{g.live_line}}</div>
+     <div class="reason">LÃ½ do live: {{ "; ".join(g.live_reasons) }}</div>
    </div>
    <div class="box">
-     <div class="score {{g.pregame_class}}">Pregame Under: {{g.pregame_score}}/100 {{g.pregame_stars}}</div>
+     <div class="score {{g.pregame_class}}">Pregame Under: {{g.pregame_score}}/100 {{g.pregame_stars}} {{g.pregame_grade}}</div>
      <div class="{{g.pregame_class}}"><b>{{g.pregame_rec}}</b></div>
-     <div><span class="badge">Confidence: {{g.pregame_conf}}%</span><span class="badge {{g.pregame_ev_class}}">EV est: {{g.pregame_ev}}%</span></div>
-     <div class="reason">Line nên kiểm tra: {{g.pregame_line}}</div>
-     <div class="reason">Lý do pregame: {{ "; ".join(g.pregame_reasons) }}</div>
+     <div><span class="badge">Confidence: {{g.pregame_conf}}%</span><span class="badge {{g.pregame_ev_class}}">EV est: {{g.pregame_ev}}%</span><span class="badge">Kelly: {{g.pregame_kelly}}% â ${{g.pregame_stake}}</span></div>
+     <div class="reason">Line nÃªn kiá»m tra: {{g.pregame_line}}</div>
+     <div class="reason">LÃ½ do pregame: {{ "; ".join(g.pregame_reasons) }}</div>
    </div>
  </div>
 </div>
 {% endfor %}
 
 <div class="footer">
-<b>V8 có gì mới:</b><br>
-• Thêm khung Odds, Weather, Umpire để sẵn sàng gắn API thật<br>
-• EV estimate có tính thêm odds/weather edge khi có dữ liệu<br>
-• Telegram alert gom Score + Confidence + EV + Odds + Weather<br><br>
-Lưu ý: nếu chưa thêm ODDS_API_KEY và WEATHER_API_KEY trong Render Environment thì các ô này sẽ hiện placeholder.
+<b>V9 cÃ³ gÃ¬ má»i:</b><br>
+â¢ Kelly stake % theo bankroll<br>
+â¢ Bullpen + Lineup slots<br>
+â¢ Grade A+, A, B+, B<br>
+â¢ Telegram cÃ³ Kelly, EV, odds/weather/umpire/bullpen/lineup<br><br>
+LÆ°u Ã½: Odds, Weather, Umpire, Bullpen, Lineup hiá»n lÃ  slot chá» API tháº­t. EV/Kelly lÃ  Æ°á»c tÃ­nh tham kháº£o, khÃ´ng pháº£i lá»i khuyÃªn tÃ i chÃ­nh.
 </div>
 </body>
 </html>"""
@@ -525,7 +556,8 @@ def index():
     games = filtered_games()
     html = render_template_string(
         HTML, games=games, best=best_bet(), running=bot_running, last_update=last_update,
-        live_alert=LIVE_ALERT_SCORE, pregame_alert=PREGAME_ALERT_SCORE, min_display=MIN_DISPLAY_SCORE
+        live_alert=LIVE_ALERT_SCORE, pregame_alert=PREGAME_ALERT_SCORE, min_display=MIN_DISPLAY_SCORE,
+        bankroll=int(BANKROLL) if BANKROLL.is_integer() else BANKROLL, max_kelly=MAX_KELLY_PCT
     )
     return Response(html, content_type="text/html; charset=utf-8")
 
@@ -548,8 +580,8 @@ def refresh():
 
 @app.route("/test")
 def test():
-    ok = send_telegram("✅ Test thành công: MLB Under Pro v8 đã kết nối Telegram.")
-    return Response("Telegram sent ✅" if ok else "Telegram failed ❌. Kiểm tra TELEGRAM_BOT_TOKEN và TELEGRAM_CHAT_ID.", status=200 if ok else 500, content_type="text/plain; charset=utf-8")
+    ok = send_telegram("â Test thÃ nh cÃ´ng: MLB Under Pro v9 ÄÃ£ káº¿t ná»i Telegram.")
+    return Response("Telegram sent â" if ok else "Telegram failed â. Kiá»m tra TELEGRAM_BOT_TOKEN vÃ  TELEGRAM_CHAT_ID.", status=200 if ok else 500, content_type="text/plain; charset=utf-8")
 
 @app.route("/api/games")
 def api_games():
