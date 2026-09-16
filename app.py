@@ -225,20 +225,20 @@ with t2:
     if under.empty:st.info("Hôm nay chưa có Under đạt chuẩn.")
     else:st.dataframe(under[["Game","Total","Under","Over","Grade","Pitchers","Status"]],
                       use_container_width=True,hide_index=True,
-                      column_config={"Under":st.column_config.ProgressColumn("Under",0,100),
-                                     "Over":st.column_config.ProgressColumn("Over",0,100)})
+                      column_config={"Under":st.column_config.ProgressColumn("Under", min_value=0, max_value=100),
+                                     "Over":st.column_config.ProgressColumn("Over", min_value=0, max_value=100)})
 with t3:
     if pregame.empty:st.info("Không còn game Pregame.")
     else:st.dataframe(pregame,use_container_width=True,hide_index=True,
-        column_config={"Under":st.column_config.ProgressColumn("Under",0,100),
-                       "Over":st.column_config.ProgressColumn("Over",0,100),
-                       "Confidence":st.column_config.ProgressColumn("Confidence",0,100)})
+        column_config={"Under":st.column_config.ProgressColumn("Under", min_value=0, max_value=100),
+                       "Over":st.column_config.ProgressColumn("Over", min_value=0, max_value=100),
+                       "Confidence":st.column_config.ProgressColumn("Confidence", min_value=0, max_value=100)})
 with t4:
     if live_df.empty:st.info("Chưa có game LIVE.")
     else:st.dataframe(live_df,use_container_width=True,hide_index=True,
-        column_config={"Under":st.column_config.ProgressColumn("Under",0,100),
-                       "Over":st.column_config.ProgressColumn("Over",0,100),
-                       "Confidence":st.column_config.ProgressColumn("Confidence",0,100)})
+        column_config={"Under":st.column_config.ProgressColumn("Under", min_value=0, max_value=100),
+                       "Over":st.column_config.ProgressColumn("Over", min_value=0, max_value=100),
+                       "Confidence":st.column_config.ProgressColumn("Confidence", min_value=0, max_value=100)})
 
 st.caption("Confidence = model signal score, not a guaranteed win probability. Missing market data => N/A/PASS.")
 st.caption("Updated "+datetime.now(TZ).strftime("%Y-%m-%d %I:%M:%S %p"))
