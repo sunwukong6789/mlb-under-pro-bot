@@ -116,36 +116,52 @@ def implied(x):
     return 100/(x+100) if x>0 else (-x)/((-x)+100)
 
 def scores(g,m,l):
-    # Conservative neutral starting point. Under receives only a small PRIORITY tie-break,
-    # not a fabricated statistical advantage.
-    u=52.0; o=48.0
-    if m["total"] is None:u=o=50.0
-    if l and l["is_live"] and m["total"] is not None and l["inn"]>0:
-        completed=max(.5,(l["inn"]-1)+(0.5 if str(l["half"]).lower().startswith("bottom") else 0))
-        pace=l["runs"]/completed
-        proj=l["runs"]+pace*max(0,9-l["inn"])
-        u += (m["total"]-proj)*5
-        if l["inn"]>=5 and l["runs"]<=3:u+=9
-        if l["bases"]!="Empty":u-=7
-        if "2B" in l["bases"] or "3B" in l["bases"]:u-=5
-        o=100-u
-    u=max(5,min(95,round(u))); o=100-u
+    # v20.4: NO SCOREBOARD CHASING.
+    # Total signal is independent from side. Side is PASS unless we have an
+    # independent edge; current ML / current score alone is NOT treated as edge.
+    u=o=50.0
+    if m["total"] is not None:
+        # Small Under prior only; this is not enough by itself to trigger a bet.
+        u,o=52.0,48.0
 
+    if l and l["is_live"] and m["total"] is not None and l["inn"]>0:
+        half=str(l["half"]).lower()
+        completed=max(.5,(l["inn"]-1)+(0.5 if half.startswith("bottom") else 0))
+        remaining=max(0.0,9.0-completed)
+
+        # Early-game pace is noisy, so damp it heavily before inning 4.
+        raw_pace=l["runs"]/completed
+        league_pace=0.50  # neutral stabilizer; prevents one early inning from dominating
+        weight=min(0.80, max(0.20, completed/7.0))
+        pace=raw_pace*weight + league_pace*(1-weight)
+        projected=l["runs"] + pace*remaining
+        edge=m["total"]-projected
+
+        u=50 + edge*5.0
+        # Late low-scoring games can strengthen Under, but never solely because score is low.
+        if completed>=5 and l["runs"]<=3: u+=4
+        # Traffic raises immediate scoring risk.
+        if l["bases"]!="Empty": u-=5
+        if "2B" in l["bases"] or "3B" in l["bases"]: u-=4
+        if l["outs"]>=2 and l["bases"]=="Empty": u+=2
+        u=max(5,min(95,round(u))); o=100-u
+
+    # SIDE MODEL: do not convert favorite/current leader into a recommendation.
+    # We still display market-implied probabilities for context, but Team Pick
+    # remains PASS until independent side inputs are available.
     ap,hp=implied(m["aml"]),implied(m["hml"])
-    if ap is None or hp is None:aw=hm=50
+    if ap is None or hp is None:
+        aw=hm=50
     else:
-        z=ap+hp; aw=100*ap/z; hm=100*hp/z
-        if l and l["is_live"]:
-            delta=l["ar"]-l["hr"]; mult=4 if l["inn"]>=5 else 2
-            aw+=delta*mult; hm=100-aw
-        aw=max(5,min(95,round(aw))); hm=100-aw
+        z=ap+hp
+        aw=round(100*ap/z); hm=100-aw
     return u,o,aw,hm
 
 def grade(x):
     return "🔥 STRONG" if x>=72 else "✅ PLAY" if x>=63 else "👀 LEAN" if x>=58 else "⚪ PASS"
 
-st.title("⚾ MLB Edge AI Pro v20.3 PRO MAX")
-st.caption("UNDER PRIORITY • Pregame + Live • Team + Total • Telegram Strong Alerts")
+st.title("⚾ MLB Edge AI Pro v20.4 PRO MAX")
+st.caption("UNDER PRIORITY • Pregame + Live • No Scoreboard Chasing • Telegram Edge Alerts")
 
 with st.sidebar:
     st.header("⚙️ Control Center")
@@ -157,7 +173,7 @@ with st.sidebar:
     st.write("Odds API", "🟢 Connected" if ODDS_KEY else "🔴 Missing")
     st.write("Telegram", "🟢 Ready" if TG_TOKEN and TG_CHAT else "🔴 Missing")
     if st.button("📨 Test Telegram",use_container_width=True):
-        ok,msg=telegram("⚾ MLB Edge AI Pro v20.3\n✅ Telegram connected successfully.")
+        ok,msg=telegram("⚾ MLB Edge AI Pro v20.4\n✅ Telegram connected successfully.")
         (st.success if ok else st.error)(msg)
 
 games=schedule(day); ck="schedule_"+day.isoformat()
@@ -171,18 +187,22 @@ if not games:st.info("Không có MLB game ngày này."); st.stop()
 events=odds_data(); rows=[]
 for g in games:
     m=market(g,events); l=live(g["pk"]); u,o,aw,hm=scores(g,m,l)
-    total_pick="UNDER" if u>=63 else "OVER" if o>=66 else "PASS"
-    side_pick=TEAM.get(g["away"],"AWAY") if aw>=60 else TEAM.get(g["home"],"HOME") if hm>=60 else "PASS"
-    total_conf=max(u,o); side_conf=max(aw,hm)
+    # Require a real live edge. Pregame has no independent pitcher/bullpen/weather
+    # model in this build, so it will PASS rather than invent confidence.
+    is_live=bool(l and l["is_live"])
+    total_pick="PASS"
+    if is_live and m["total"] is not None:
+        if u>=66: total_pick="UNDER"
+        elif o>=70: total_pick="OVER"   # higher bar because this bot is Under-priority
 
-    # Under priority: when Under is playable, it wins close comparisons.
-    if total_pick=="UNDER" and u>=side_conf-3:
-        best=f"UNDER {m['total']}" if m["total"] is not None else "PASS"; conf=u
-    elif side_pick!="PASS" and side_conf>total_conf:
-        best=side_pick+" ML"; conf=side_conf
-    elif total_pick!="PASS" and m["total"] is not None:
+    # Never select a team merely because it is favorite or currently leading.
+    side_pick="PASS"
+    total_conf=max(u,o); side_conf=50
+
+    if total_pick!="PASS":
         best=f"{total_pick} {m['total']}"; conf=total_conf
-    else:best="PASS"; conf=max(total_conf,side_conf)
+    else:
+        best="PASS"; conf=total_conf
 
     status="LIVE" if l and l["is_live"] else g["status"]
     score=f"{l['ar']}-{l['hr']}" if l else "0-0"
@@ -199,7 +219,7 @@ for g in games:
         sent=st.session_state.setdefault("sent_alerts",set())
         if alert_key not in sent:
             kind="🔴 LIVE" if status=="LIVE" else "🧠 PREGAME"
-            msg=(f"⚾ MLB EDGE AI PRO v20.3\n{kind}\n{g['game']}\n"
+            msg=(f"⚾ MLB EDGE AI PRO v20.4\n{kind}\n{g['game']}\n"
                  f"🔥 BEST BET: {best}\nConfidence: {conf}/100\n"
                  f"Score: {score} | {inning}\nPitchers: {g['ap']} / {g['hp']}")
             ok,_=telegram(msg)
@@ -240,7 +260,7 @@ with t4:
                        "Over":st.column_config.ProgressColumn("Over", min_value=0, max_value=100),
                        "Confidence":st.column_config.ProgressColumn("Confidence", min_value=0, max_value=100)})
 
-st.caption("Confidence = model signal score, not a guaranteed win probability. Missing market data => N/A/PASS.")
+st.caption("v20.4: Team Pick will PASS rather than chase the favorite/current leader. Confidence is a signal score, not a guaranteed win probability.")
 st.caption("Updated "+datetime.now(TZ).strftime("%Y-%m-%d %I:%M:%S %p"))
 if auto:
     time.sleep(REFRESH); st.rerun()
