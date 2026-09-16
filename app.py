@@ -160,8 +160,8 @@ def scores(g,m,l):
 def grade(x):
     return "🔥 STRONG" if x>=72 else "✅ PLAY" if x>=63 else "👀 LEAN" if x>=58 else "⚪ PASS"
 
-st.title("⚾ MLB Edge AI Pro v20.5 ELITE")
-st.caption("ELITE FILTER • UNDER PRIORITY • Pregame + Live • Max 2 Telegram Alerts/day")
+st.title("⚾ MLB Edge AI Pro v20.6 ELITE")
+st.caption("ELITE FILTER • UNDER PRIORITY • PREGAME + LIVE • Max 2 alerts/day")
 
 with st.sidebar:
     st.header("⚙️ Control Center")
@@ -169,11 +169,12 @@ with st.sidebar:
     auto=st.toggle("Auto refresh 30s",True)
     strong=st.slider("Elite alert threshold",75,92,80)
     bankroll=st.number_input("Bankroll",10.0,value=1000.0,step=10.0)
+    min_acceptable_odds=st.number_input("Do not take worse than",value=-115,step=5)
     st.divider()
     st.write("Odds API", "🟢 Connected" if ODDS_KEY else "🔴 Missing")
     st.write("Telegram", "🟢 Ready" if TG_TOKEN and TG_CHAT else "🔴 Missing")
     if st.button("📨 Test Telegram",use_container_width=True):
-        ok,msg=telegram("⚾ MLB Edge AI Pro v20.5 ELITE\n✅ Telegram connected successfully.")
+        ok,msg=telegram("⚾ MLB Edge AI Pro v20.6 ELITE\n✅ Telegram connected successfully.")
         (st.success if ok else st.error)(msg)
 
 games=schedule(day); ck="schedule_"+day.isoformat()
@@ -208,7 +209,7 @@ for g in games:
     score=f"{l['ar']}-{l['hr']}" if l else "0-0"
     inning=f"{l['half']} {l['inn']} • {l['outs']} out" if l and l["is_live"] else "Pregame"
     row={"Game":g["game"],"Status":status,"Score":score,"Inning":inning,
-      "Pitchers":f"{g['ap']} / {g['hp']}","Book":m["book"],"Total":m["total"] or "N/A",
+      "Pitchers":f"{g['ap']} / {g['hp']}","Book":m["book"],"Total":m["total"] or "N/A","Under Odds":m.get("under") or "N/A","Over Odds":m.get("over") or "N/A",
       "Under":u,"Over":o,"Total Pick":total_pick,"Away":aw,"Home":hm,
       "Team Pick":side_pick,"Best Bet":best,"Confidence":conf,"Grade":grade(conf)}
     rows.append(row)
@@ -223,22 +224,45 @@ pregame=df[df["Status"]!="LIVE"]; live_df=df[df["Status"]=="LIVE"]
 # ELITE TELEGRAM FILTER — max 2/day, threshold 80 by default.
 MAX_DAILY_ALERTS=2
 sent_day_key=f"elite_sent:{day.isoformat()}"
-sent_today=st.session_state.setdefault(sent_day_key,set())
+# Duplicate guard survives Streamlit reruns on the same Render instance.
+sent_file="/tmp/mlb_elite_sent.txt"
+try:
+    with open(sent_file,"r",encoding="utf-8") as f:
+        sent_today=set(x.strip() for x in f if x.strip().startswith(day.isoformat()+":"))
+except Exception:
+    sent_today=set()
+st.session_state[sent_day_key]=sent_today
 elite=df[(df["Best Bet"]!="PASS") & (df["Confidence"]>=strong)].copy()
 if not elite.empty:
     elite["UnderPriority"]=elite["Best Bet"].astype(str).str.startswith("UNDER").astype(int)
     elite=elite.sort_values(["Confidence","UnderPriority"],ascending=[False,False]).head(MAX_DAILY_ALERTS)
     for _,r in elite.iterrows():
-        alert_key=f"{day.isoformat()}:{r['Game']}:{r['Best Bet']}:{r['Status']}"
+        alert_key=f"{day.isoformat()}:{r['Game']}:{r['Best Bet']}"
         if alert_key in sent_today: continue
         if len(sent_today)>=MAX_DAILY_ALERTS: break
         kind="🔴 LIVE" if r["Status"]=="LIVE" else "🧠 PREGAME"
-        msg=(f"⚾ MLB EDGE AI PRO v20.5 ELITE\\n{kind}\\n{r['Game']}\\n"
-             f"💎 ELITE PICK: {r['Best Bet']}\\nEdge Score: {r['Confidence']}/100\\n"
-             f"Score: {r['Score']} | {r['Inning']}\\nTotal: {r['Total']} | Pitchers: {r['Pitchers']}\\n"
-             f"Filter: Top {MAX_DAILY_ALERTS} only • Threshold {strong}+")
+        bet=str(r["Best Bet"])
+        market_price=r["Under Odds"] if bet.startswith("UNDER") else r["Over Odds"] if bet.startswith("OVER") else "N/A"
+        msg=(f"⚾ MLB EDGE AI PRO v20.6\n"
+             f"{kind} • {r['Game']}\n"
+             f"━━━━━━━━━━━━━━\n"
+             f"💎 PICK: {bet}\n"
+             f"🔥 Edge Score: {r['Confidence']}/100\n"
+             f"💰 Market odds: {market_price}\n"
+             f"🛡️ Do not take worse than: {min_acceptable_odds}\n\n"
+             f"⚾ Score: {r['Score']} | {r['Inning']}\n"
+             f"🎯 Pitchers: {r['Pitchers']}\n"
+             f"👤 Team side: {r['Team Pick']}\n"
+             f"━━━━━━━━━━━━━━\n"
+             f"⭐ ELITE ALERT • Verify current sportsbook line")
         ok,_=telegram(msg)
-        if ok: sent_today.add(alert_key)
+        if ok:
+            sent_today.add(alert_key)
+            try:
+                with open(sent_file,"a",encoding="utf-8") as f:
+                    f.write(alert_key+"\\n")
+            except Exception:
+                pass
 
 
 c1,c2,c3,c4=st.columns(4)
