@@ -160,13 +160,26 @@ def scores(g,m,l):
 def grade(x):
     return "🔥 STRONG" if x>=72 else "✅ PLAY" if x>=63 else "👀 LEAN" if x>=58 else "⚪ PASS"
 
-st.title("⚾ MLB Edge AI Pro v20.6 ELITE")
+def stake_recommendation(bankroll, edge_score):
+    # Conservative fixed-risk sizing; Edge Score is NOT a calibrated win probability.
+    if edge_score >= 88:
+        pct = 0.025
+    elif edge_score >= 84:
+        pct = 0.020
+    elif edge_score >= 80:
+        pct = 0.015
+    else:
+        pct = 0.0
+    return round(bankroll * pct, 2), pct * 100
+
+
+st.title("⚾ MLB Edge AI Pro v20.6.2 ELITE")
 st.caption("ELITE FILTER • UNDER PRIORITY • PREGAME + LIVE • Max 2 alerts/day")
 
 with st.sidebar:
     st.header("⚙️ Control Center")
     day=st.date_input("Game date",datetime.now(TZ).date())
-    auto=st.toggle("Auto refresh 30s",True)
+    auto=st.toggle("Smart auto refresh",True)
     strong=st.slider("Elite alert threshold",75,92,80)
     bankroll=st.number_input("Bankroll",10.0,value=1000.0,step=10.0)
     min_acceptable_odds=st.number_input("Do not take worse than",value=-115,step=5)
@@ -174,7 +187,7 @@ with st.sidebar:
     st.write("Odds API", "🟢 Connected" if ODDS_KEY else "🔴 Missing")
     st.write("Telegram", "🟢 Ready" if TG_TOKEN and TG_CHAT else "🔴 Missing")
     if st.button("📨 Test Telegram",use_container_width=True):
-        ok,msg=telegram("⚾ MLB Edge AI Pro v20.6 ELITE\n✅ Telegram connected successfully.")
+        ok,msg=telegram("⚾ MLB Edge AI Pro v20.6.2 ELITE\n✅ Telegram connected successfully.")
         (st.success if ok else st.error)(msg)
 
 games=schedule(day); ck="schedule_"+day.isoformat()
@@ -243,13 +256,15 @@ if not elite.empty:
         kind="🔴 LIVE" if r["Status"]=="LIVE" else "🧠 PREGAME"
         bet=str(r["Best Bet"])
         market_price=r["Under Odds"] if bet.startswith("UNDER") else r["Over Odds"] if bet.startswith("OVER") else "N/A"
-        msg=(f"⚾ MLB EDGE AI PRO v20.6\n"
+        stake, stake_pct = stake_recommendation(bankroll, float(r["Confidence"]))
+        msg=(f"⚾ MLB EDGE AI PRO v20.6.2\n"
              f"{kind} • {r['Game']}\n"
              f"━━━━━━━━━━━━━━\n"
              f"💎 PICK: {bet}\n"
              f"🔥 Edge Score: {r['Confidence']}/100\n"
              f"💰 Market odds: {market_price}\n"
-             f"🛡️ Do not take worse than: {min_acceptable_odds}\n\n"
+             f"🛡️ Do not take worse than: {min_acceptable_odds}\n"
+             f"💵 Suggested stake: ${stake:.2f} ({stake_pct:.1f}% bankroll)\n\n"
              f"⚾ Score: {r['Score']} | {r['Inning']}\n"
              f"🎯 Pitchers: {r['Pitchers']}\n"
              f"👤 Team side: {r['Team Pick']}\n"
