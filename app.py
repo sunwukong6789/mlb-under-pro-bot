@@ -160,20 +160,20 @@ def scores(g,m,l):
 def grade(x):
     return "🔥 STRONG" if x>=72 else "✅ PLAY" if x>=63 else "👀 LEAN" if x>=58 else "⚪ PASS"
 
-st.title("⚾ MLB Edge AI Pro v20.4 PRO MAX")
-st.caption("UNDER PRIORITY • Pregame + Live • No Scoreboard Chasing • Telegram Edge Alerts")
+st.title("⚾ MLB Edge AI Pro v20.5 ELITE")
+st.caption("ELITE FILTER • UNDER PRIORITY • Pregame + Live • Max 2 Telegram Alerts/day")
 
 with st.sidebar:
     st.header("⚙️ Control Center")
     day=st.date_input("Game date",datetime.now(TZ).date())
     auto=st.toggle("Auto refresh 30s",True)
-    strong=st.slider("Strong alert threshold",68,90,72)
+    strong=st.slider("Elite alert threshold",75,92,80)
     bankroll=st.number_input("Bankroll",10.0,value=1000.0,step=10.0)
     st.divider()
     st.write("Odds API", "🟢 Connected" if ODDS_KEY else "🔴 Missing")
     st.write("Telegram", "🟢 Ready" if TG_TOKEN and TG_CHAT else "🔴 Missing")
     if st.button("📨 Test Telegram",use_container_width=True):
-        ok,msg=telegram("⚾ MLB Edge AI Pro v20.4\n✅ Telegram connected successfully.")
+        ok,msg=telegram("⚾ MLB Edge AI Pro v20.5 ELITE\n✅ Telegram connected successfully.")
         (st.success if ok else st.error)(msg)
 
 games=schedule(day); ck="schedule_"+day.isoformat()
@@ -192,8 +192,8 @@ for g in games:
     is_live=bool(l and l["is_live"])
     total_pick="PASS"
     if is_live and m["total"] is not None:
-        if u>=66: total_pick="UNDER"
-        elif o>=70: total_pick="OVER"   # higher bar because this bot is Under-priority
+        if u>=72: total_pick="UNDER"
+        elif o>=76: total_pick="OVER"   # higher bar because this bot is Under-priority
 
     # Never select a team merely because it is favorite or currently leading.
     side_pick="PASS"
@@ -213,22 +213,33 @@ for g in games:
       "Team Pick":side_pick,"Best Bet":best,"Confidence":conf,"Grade":grade(conf)}
     rows.append(row)
 
-    # Telegram: strong picks only; dedupe per day/game/bet.
-    if best!="PASS" and conf>=strong and TG_TOKEN and TG_CHAT:
-        alert_key=f"{day}:{g['pk']}:{best}:{status}"
-        sent=st.session_state.setdefault("sent_alerts",set())
-        if alert_key not in sent:
-            kind="🔴 LIVE" if status=="LIVE" else "🧠 PREGAME"
-            msg=(f"⚾ MLB EDGE AI PRO v20.4\n{kind}\n{g['game']}\n"
-                 f"🔥 BEST BET: {best}\nConfidence: {conf}/100\n"
-                 f"Score: {score} | {inning}\nPitchers: {g['ap']} / {g['hp']}")
-            ok,_=telegram(msg)
-            if ok:sent.add(alert_key)
+    # Candidate only; Telegram is sent after all games are ranked.
 
 df=pd.DataFrame(rows)
 top=df[df["Best Bet"]!="PASS"].sort_values("Confidence",ascending=False)
 under=df[(df["Total Pick"]=="UNDER")].sort_values("Under",ascending=False)
 pregame=df[df["Status"]!="LIVE"]; live_df=df[df["Status"]=="LIVE"]
+
+# ELITE TELEGRAM FILTER — max 2/day, threshold 80 by default.
+MAX_DAILY_ALERTS=2
+sent_day_key=f"elite_sent:{day.isoformat()}"
+sent_today=st.session_state.setdefault(sent_day_key,set())
+elite=df[(df["Best Bet"]!="PASS") & (df["Confidence"]>=strong)].copy()
+if not elite.empty:
+    elite["UnderPriority"]=elite["Best Bet"].astype(str).str.startswith("UNDER").astype(int)
+    elite=elite.sort_values(["Confidence","UnderPriority"],ascending=[False,False]).head(MAX_DAILY_ALERTS)
+    for _,r in elite.iterrows():
+        alert_key=f"{day.isoformat()}:{r['Game']}:{r['Best Bet']}:{r['Status']}"
+        if alert_key in sent_today: continue
+        if len(sent_today)>=MAX_DAILY_ALERTS: break
+        kind="🔴 LIVE" if r["Status"]=="LIVE" else "🧠 PREGAME"
+        msg=(f"⚾ MLB EDGE AI PRO v20.5 ELITE\\n{kind}\\n{r['Game']}\\n"
+             f"💎 ELITE PICK: {r['Best Bet']}\\nEdge Score: {r['Confidence']}/100\\n"
+             f"Score: {r['Score']} | {r['Inning']}\\nTotal: {r['Total']} | Pitchers: {r['Pitchers']}\\n"
+             f"Filter: Top {MAX_DAILY_ALERTS} only • Threshold {strong}+")
+        ok,_=telegram(msg)
+        if ok: sent_today.add(alert_key)
+
 
 c1,c2,c3,c4=st.columns(4)
 c1.metric("Games",len(df)); c2.metric("Playable",len(top))
