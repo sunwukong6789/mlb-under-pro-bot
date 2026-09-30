@@ -9,7 +9,7 @@ import streamlit as st
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-st.set_page_config(page_title="MLB Edge AI Pro v24", page_icon="⚾", layout="wide")
+st.set_page_config(page_title="MLB Edge AI Pro v24.1", page_icon="⚾", layout="wide")
 
 TZ = ZoneInfo("America/Los_Angeles")
 REFRESH = int(os.getenv("REFRESH_SECONDS", "30"))
@@ -110,6 +110,9 @@ def games_for(day):
             an = a["team"]["name"]; hn = h["team"]["name"]
             out.append({
                 "pk": g["gamePk"], "away": an, "home": hn,
+                "away_id": a["team"]["id"], "home_id": h["team"]["id"],
+                "ap_id": a.get("probablePitcher", {}).get("id"),
+                "hp_id": h.get("probablePitcher", {}).get("id"),
                 "game": f"{TEAM.get(an, an[:3])} @ {TEAM.get(hn, hn[:3])}",
                 "status": g.get("status", {}).get("detailedState", "Unknown"),
                 "ap": a.get("probablePitcher", {}).get("fullName", "TBD"),
@@ -136,68 +139,33 @@ def market(game, events):
     ev = next((x for x in events
                if x.get("home_team") == game["home"]
                and x.get("away_team") == game["away"]), None)
-
-    empty = {
-        "total":None,"under":None,"over":None,"book":"N/A","books":0,
-        "age":None,"spread":None,"pairs":[],"fair_under":None,
-        "ev":None,"median_under":None
-    }
-    if not ev:
-        return empty
-
-    q = []
-    for b in ev.get("bookmakers", []):
-        for mk in b.get("markets", []):
-            if mk.get("key") != "totals":
-                continue
-            o = next((x for x in mk.get("outcomes", []) if x.get("name") == "Over"), None)
-            u = next((x for x in mk.get("outcomes", []) if x.get("name") == "Under"), None)
-            if o and u and o.get("point") == u.get("point"):
-                q.append({
-                    "line": float(o["point"]),
-                    "over": o.get("price"),
-                    "under": u.get("price"),
-                    "book": b.get("title", "Unknown"),
-                    "updated": mk.get("last_update") or b.get("last_update")
-                })
-
-    if not q:
-        return empty
-
-    lines = [x["line"] for x in q]
-    med = float(statistics.median(lines))
-    same = [x for x in q if x["line"] == med]
-    if not same:
-        same = [min(q, key=lambda x: abs(x["line"] - med))]
-        med = same[0]["line"]
-
-    valid_under = [x for x in same if x["under"] is not None]
-    if not valid_under:
-        return empty
-
-    best = max(valid_under, key=lambda x: x["under"])
-    fair_probs = [no_vig_under(x["over"], x["under"]) for x in same]
-    fair_probs = [x for x in fair_probs if x is not None]
-    fair_under = statistics.median(fair_probs) if fair_probs else None
-    edge_ev = ev_pct(fair_under, best["under"])
-
-    updates = [dt(x["updated"]) for x in q]
-    updates = [x for x in updates if x]
-    age = round((datetime.now(timezone.utc) - max(updates)).total_seconds()/60, 1) if updates else None
-
-    return {
-        "total": med,
-        "under": best["under"],
-        "over": best["over"],
-        "book": best["book"],
-        "books": len(q),
-        "age": age,
-        "spread": round(max(lines)-min(lines), 1),
-        "pairs": same,
-        "fair_under": fair_under,
-        "ev": edge_ev,
-        "median_under": statistics.median([x["under"] for x in same if x["under"] is not None])
-    }
+    empty = {"total":None,"under":None,"over":None,"under_book":"N/A","over_book":"N/A",
+             "book":"N/A","books":0,"age":None,"spread":None,"pairs":[],
+             "market_fair_under":None,"market_fair_over":None}
+    if not ev: return empty
+    q=[]
+    for b in ev.get("bookmakers",[]):
+        for mk in b.get("markets",[]):
+            if mk.get("key")!="totals": continue
+            o=next((x for x in mk.get("outcomes",[]) if x.get("name")=="Over"),None)
+            u=next((x for x in mk.get("outcomes",[]) if x.get("name")=="Under"),None)
+            if o and u and o.get("point")==u.get("point"):
+                q.append({"line":float(o["point"]),"over":o.get("price"),"under":u.get("price"),
+                          "book":b.get("title","Unknown"),"updated":mk.get("last_update") or b.get("last_update")})
+    if not q: return empty
+    lines=[x["line"] for x in q]; med=float(statistics.median(lines))
+    same=[x for x in q if x["line"]==med] or [min(q,key=lambda x:abs(x["line"]-med))]
+    med=same[0]["line"] if not any(x["line"]==med for x in q) else med
+    us=[x for x in same if x["under"] is not None]; os_=[x for x in same if x["over"] is not None]
+    if not us or not os_: return empty
+    bu=max(us,key=lambda x:x["under"]); bo=max(os_,key=lambda x:x["over"])
+    fps=[no_vig_under(x["over"],x["under"]) for x in same]
+    fps=[x for x in fps if x is not None]; fu=statistics.median(fps) if fps else None
+    updates=[dt(x["updated"]) for x in q]; updates=[x for x in updates if x]
+    age=round((datetime.now(timezone.utc)-max(updates)).total_seconds()/60,1) if updates else None
+    return {"total":med,"under":bu["under"],"over":bo["over"],"under_book":bu["book"],"over_book":bo["book"],
+            "book":bu["book"],"books":len(q),"age":age,"spread":round(max(lines)-min(lines),1),"pairs":same,
+            "market_fair_under":fu,"market_fair_over":1-fu if fu is not None else None}
 
 def live(pk):
     d = get(FEED.format(pk), timeout=10)
@@ -265,86 +233,115 @@ def remember(g, m, s):
     save_memory(mem)
     return r
 
-def common_gates(m, max_price=-115):
-    bad = []
-    if not ODDS_KEY:
-        bad.append("Thiếu ODDS_API_KEY")
-    if m["total"] is None:
-        bad.append("Không có sportsbook total thật")
-    if m["books"] < 4:
-        bad.append("Cần ít nhất 4 sportsbook")
-    if m["age"] is None or m["age"] > 8:
-        bad.append("Odds cũ hoặc thiếu timestamp")
-    if m["spread"] is not None and m["spread"] > 1:
-        bad.append(f"Books lệch {m['spread']:.1f} run")
-    if m["under"] is None:
-        bad.append("Không có giá Under")
-    elif m["under"] < max_price:
-        bad.append(f"Giá Under quá đắt ({m['under']})")
+PARK = {"COL":1.16,"BOS":1.07,"CIN":1.06,"NYY":1.05,"PHI":1.04,"ARI":1.04,
+        "TEX":1.03,"LAD":1.02,"CHC":1.02,"BAL":1.01,"ATL":1.01,"KC":1.00,
+        "LAA":1.00,"ATH":1.00,"HOU":0.99,"MIN":0.99,"TOR":0.99,"WSH":0.99,
+        "CWS":0.99,"CLE":0.98,"MIL":0.98,"STL":0.98,"SD":0.96,"SEA":0.94,
+        "SF":0.94,"TB":0.96,"MIA":0.96,"PIT":0.97,"NYM":0.98,"DET":0.98}
+
+@st.cache_data(ttl=600, show_spinner=False)
+def recent_team_form(day_iso):
+    """Independent baseball input: runs scored/allowed from completed MLB games in prior 14 days."""
+    from datetime import date, timedelta
+    day=date.fromisoformat(day_iso); start=day-timedelta(days=14); end=day-timedelta(days=1)
+    d=get(SCHEDULE,{"sportId":1,"startDate":start.isoformat(),"endDate":end.isoformat()}) or {}
+    z={}
+    for block in d.get("dates",[]):
+        for g in block.get("games",[]):
+            if g.get("status",{}).get("abstractGameState")!="Final": continue
+            a=g["teams"]["away"]; h=g["teams"]["home"]
+            if a.get("score") is None or h.get("score") is None: continue
+            aid=a["team"]["id"]; hid=h["team"]["id"]; ar=float(a["score"]); hr=float(h["score"])
+            z.setdefault(aid,{"rs":[],"ra":[]}); z.setdefault(hid,{"rs":[],"ra":[]})
+            z[aid]["rs"].append(ar); z[aid]["ra"].append(hr); z[hid]["rs"].append(hr); z[hid]["ra"].append(ar)
+    out={}
+    for tid,v in z.items():
+        out[tid]={"rpg":sum(v["rs"])/len(v["rs"]),"rapg":sum(v["ra"])/len(v["ra"]),"n":len(v["rs"])}
+    return out
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def pitcher_era(pid, season):
+    if not pid: return None
+    d=get(f"https://statsapi.mlb.com/api/v1/people/{pid}/stats",{"stats":"season","group":"pitching","season":season}) or {}
+    try:
+        splits=d["stats"][0]["splits"]
+        return float(splits[0]["stat"]["era"]) if splits else None
+    except (KeyError,IndexError,TypeError,ValueError): return None
+
+def normal_cdf(x, mu, sd=3.05):
+    return .5*(1+math.erf((x-mu)/(sd*math.sqrt(2))))
+
+def model_probs(proj, line):
+    # Treat integer totals with a push band; half totals have no practical push.
+    if abs(line-round(line)) < .01:
+        p_under=normal_cdf(line-.5,proj); p_over=1-normal_cdf(line+.5,proj)
+        p_push=max(0,1-p_under-p_over)
+    else:
+        p_under=normal_cdf(line,proj); p_over=1-p_under; p_push=0
+    return p_under,p_over,p_push
+
+def bet_ev(prob_win, prob_push, odds):
+    d=american_decimal(odds)
+    if d is None: return None
+    p_loss=max(0,1-prob_win-prob_push)
+    return (prob_win*(d-1)-p_loss)*100
+
+def independent_projection(g, form, season):
+    a=form.get(g["away_id"]); h=form.get(g["home_id"])
+    if not a or not h or min(a["n"],h["n"])<5: return None,None
+    # Blend each offense with opponent recent run prevention; 4.45 is a neutral MLB run/team anchor.
+    away_runs=.55*a["rpg"]+.30*h["rapg"]+.15*4.45
+    home_runs=.55*h["rpg"]+.30*a["rapg"]+.15*4.45
+    ap=pitcher_era(g.get("ap_id"),season); hp=pitcher_era(g.get("hp_id"),season)
+    # Starter adjustment is deliberately capped so ERA never dominates the model.
+    if hp is not None: away_runs += max(-.55,min(.55,(hp-4.20)*.18))
+    if ap is not None: home_runs += max(-.55,min(.55,(ap-4.20)*.18))
+    pf=PARK.get(TEAM.get(g["home"],""),1.0)
+    proj=max(4.5,min(13.5,(away_runs+home_runs)*pf))
+    meta={"away_rpg":a["rpg"],"home_rpg":h["rpg"],"away_rapg":a["rapg"],"home_rapg":h["rapg"],
+          "ap_era":ap,"hp_era":hp,"park":pf,"games":min(a["n"],h["n"])}
+    return proj,meta
+
+def common_gates(m):
+    bad=[]
+    if not ODDS_KEY: bad.append("Thiếu ODDS_API_KEY")
+    if m["total"] is None: bad.append("Không có sportsbook total thật")
+    if m["books"]<4: bad.append("Cần ít nhất 4 sportsbook")
+    if m["age"] is None or m["age"]>8: bad.append("Odds cũ hoặc thiếu timestamp")
+    if m["spread"] is not None and m["spread"]>1: bad.append(f"Books lệch {m['spread']:.1f} run")
     return bad
 
-def analyze_pregame(m, mem, threshold, min_ev, min_fair_prob, max_price):
-    z = {
-        "pick":"PASS","mode":"PREGAME","quality":0,"projection":None,
-        "edge":None,"min_line":None,"move":"N/A","fair_prob":None,
-        "ev":None,"reason":"Chưa đủ dữ liệu"
-    }
-    bad = common_gates(m, max_price)
-    if mem is None:
-        bad.append("Chưa có baseline pregame")
-        z["reason"] = "; ".join(bad)
+def analyze_pregame(g,m,mem,form,threshold,min_model_ev,min_model_edge,max_price):
+    z={"pick":"PASS","mode":"PREGAME","quality":0,"projection":None,"edge":None,"min_line":None,
+       "move":"N/A","fair_prob":None,"ev":None,"reason":"Chưa đủ dữ liệu","odds":None,"book":"N/A"}
+    bad=common_gates(m)
+    if mem is None: bad.append("Chưa có baseline pregame")
+    proj,meta=independent_projection(g,form,day.year)
+    if proj is None: bad.append("Thiếu recent-form data độc lập")
+    if bad: z["reason"]="; ".join(bad); return z
+    current=float(m["total"]); opening=float(mem["opening"]); move=current-opening
+    raw_edge=current-proj
+    side="UNDER" if raw_edge>=min_model_edge else "OVER" if raw_edge<=-min_model_edge else "PASS"
+    if side=="PASS":
+        z.update(projection=round(proj,2),edge=round(abs(raw_edge),2),move=f"{move:+.1f}",reason=f"Model edge {abs(raw_edge):.2f} < {min_model_edge:.2f}")
         return z
-
-    opening = float(mem["opening"])
-    current = float(m["total"])
-    move = current - opening
-    fair = m.get("fair_under")
-    ev = m.get("ev")
-    med_price = m.get("median_under")
-
-    if int(mem.get("seen",1)) < 2:
-        bad.append("Cần ít nhất 2 refresh để xác nhận line")
-    if fair is None:
-        bad.append("Không tính được no-vig probability")
-    elif fair < min_fair_prob:
-        bad.append(f"Fair Under {fair*100:.1f}% < {min_fair_prob*100:.1f}%")
-    if ev is None:
-        bad.append("Không tính được EV")
-    elif ev < min_ev:
-        bad.append(f"EV {ev:.1f}% < {min_ev:.1f}%")
-    if med_price is None or med_price > -102:
-        bad.append(f"Consensus Under chưa đủ mạnh ({med_price})")
-    if move > 0.5:
-        bad.append(f"Line đi ngược Under {move:+.1f}")
-
-    # Score is signal quality, not win probability.
-    quality = 50
-    quality += min(m["books"], 10) * 2
-    if fair is not None:
-        quality += max(0, min(12, (fair - .50) * 200))
-    if ev is not None:
-        quality += max(0, min(12, ev * 1.5))
-    if move < 0:
-        quality += min(8, abs(move) * 8)
-    elif move > .5:
-        quality -= 10
-    if m["under"] is not None and m["under"] <= -110:
-        quality -= min(6, abs(m["under"] + 110) * .5)
-    quality = int(max(0, min(94, round(quality))))
-
-    if quality < threshold:
-        bad.append(f"Quality {quality} < {threshold}")
-
-    z.update(
-        pick="UNDER" if not bad else "PASS",
-        quality=quality,
-        move=f"{move:+.1f}",
-        min_line=current,
-        fair_prob=round(fair*100,1) if fair is not None else None,
-        ev=round(ev,1) if ev is not None else None,
-        reason=("No-vig consensus + EV + line movement đều đạt chuẩn"
-                if not bad else "; ".join(bad))
-    )
+    odds_=m["under"] if side=="UNDER" else m["over"]; book=m["under_book"] if side=="UNDER" else m["over_book"]
+    if odds_ is None: bad.append(f"Không có giá {side}")
+    elif odds_ < max_price: bad.append(f"Giá {side} quá đắt ({odds_})")
+    pu,po,pp=model_probs(proj,current); pw=pu if side=="UNDER" else po
+    mev=bet_ev(pw,pp,odds_)
+    if mev is None or mev<min_model_ev: bad.append(f"Model EV {mev if mev is not None else 'N/A'} < {min_model_ev:.1f}%")
+    if int(mem.get("seen",1))<2: bad.append("Cần ít nhất 2 refresh để xác nhận line")
+    # Reject meaningful movement against our chosen side.
+    if side=="UNDER" and move>0.5: bad.append(f"Line đi ngược UNDER {move:+.1f}")
+    if side=="OVER" and move<-0.5: bad.append(f"Line đi ngược OVER {move:+.1f}")
+    edge=abs(raw_edge)
+    quality=58+edge*10+min(m["books"],8)*1.3+max(0,min(10,(mev or 0)*1.2))
+    quality=int(max(0,min(94,round(quality))))
+    if quality<threshold: bad.append(f"Quality {quality} < {threshold}")
+    z.update(pick=side if not bad else "PASS",quality=quality,projection=round(proj,2),edge=round(edge,2),
+             min_line=current,move=f"{move:+.1f}",fair_prob=round(pw*100,1),ev=round(mev,1) if mev is not None else None,
+             odds=odds_,book=book,reason=(f"Independent model: recent offense/run prevention + starters + park; market only validates price" if not bad else "; ".join(bad)))
     return z
 
 def analyze_live(m, s, mem, min_edge, threshold, min_ev, max_price):
@@ -353,7 +350,9 @@ def analyze_live(m, s, mem, min_edge, threshold, min_ev, max_price):
         "edge":None,"min_line":None,"move":"N/A","fair_prob":None,
         "ev":None,"reason":"Chưa đủ dữ liệu"
     }
-    bad = common_gates(m, max_price)
+    bad = common_gates(m)
+    if m.get("under") is None: bad.append("Không có giá Under")
+    elif m["under"] < max_price: bad.append(f"Giá Under quá đắt ({m['under']})")
     if not s or not s["is_live"]:
         bad.append("Chưa LIVE")
     if mem is None:
@@ -382,8 +381,8 @@ def analyze_live(m, s, mem, min_edge, threshold, min_ev, max_price):
     edge = current - projection
     minimum = math.ceil((projection + min_edge) * 2) / 2
 
-    fair = m.get("fair_under")
-    market_ev = m.get("ev")
+    fair = m.get("market_fair_under")
+    market_ev = ev_pct(fair, m.get("under")) if fair is not None else None
 
     if s["bases"] != "Empty":
         bad.append(f"Có runner: {s['bases']}")
@@ -413,6 +412,8 @@ def analyze_live(m, s, mem, min_edge, threshold, min_ev, max_price):
         move=f"{move:+.1f}",
         fair_prob=round(fair*100,1) if fair is not None else None,
         ev=round(market_ev,1) if market_ev is not None else None,
+        odds=m.get("under"),
+        book=m.get("under_book",m.get("book","N/A")),
         reason=("Projection + no-vig EV + current line đều còn value"
                 if not bad else "; ".join(bad))
     )
@@ -434,24 +435,44 @@ def log_alert(r):
     except OSError:
         pass
 
-st.title("⚾ MLB Edge AI Pro v24 — Value First Mode")
-st.caption("REAL ODDS • NO-VIG FAIR PROBABILITY • EV FILTER • LINE VALUE • STRICT TELEGRAM")
+def settle_history():
+    if not LOG.exists(): return
+    try:
+        h=pd.read_csv(LOG)
+    except Exception:
+        return
+    changed=False
+    for i,r in h.iterrows():
+        if str(r.get("Result","")).strip() not in {"","nan","None"}: continue
+        try: pk=int(r["Game PK"]); line=float(r["Line"]); odds_=float(r["Odds"]); pick=str(r["Pick"]).upper()
+        except (ValueError,TypeError,KeyError): continue
+        s0=live(pk)
+        if not s0 or s0.get("is_live") or str(s0.get("status","")).lower() not in {"final","game over","completed early"}: continue
+        total=float(s0["runs"]); result="PUSH" if abs(total-line)<1e-9 else ("WIN" if (pick=="UNDER" and total<line) or (pick=="OVER" and total>line) else "LOSS")
+        dec=american_decimal(odds_) or 1
+        profit=0.0 if result=="PUSH" else (dec-1 if result=="WIN" else -1.0)
+        h.at[i,"Result"]=result; h.at[i,"Profit Units"]=round(profit,3); changed=True
+    if changed:
+        try: h.to_csv(LOG,index=False)
+        except OSError: pass
+
+st.title("⚾ MLB Edge AI Pro v24.1 — Independent Projection")
+st.caption("INDEPENDENT RUN PROJECTION • UNDER / OVER / PASS • MARKET PRICE VALIDATION • STRICT TELEGRAM")
 st.warning(
-    "v24: Quality Score KHÔNG phải xác suất thắng. "
-    "VERIFIED chỉ xuất hiện khi dữ liệu, giá cược và EV đều đạt chuẩn."
+    "v24.1: Sportsbook KHÔNG quyết định hướng pick. Model baseball tạo projected total trước; odds chỉ kiểm tra value."
 )
 
 with st.sidebar:
-    st.header("⚙️ V24 Control Center")
+    st.header("⚙️ V24.1 Control Center")
     day = st.date_input("Game date", datetime.now(TZ).date())
     auto = st.toggle(f"Auto refresh {REFRESH}s", True)
     pregame_threshold = st.slider("Pregame Quality threshold", 75, 94, 84)
     live_threshold = st.slider("Live Quality threshold", 78, 94, 86)
-    min_ev = st.slider("Minimum EV %", 0.0, 8.0, 2.0, .5)
-    min_fair_prob = st.slider("Minimum fair Under probability", .50, .60, .525, .005)
+    min_ev = st.slider("Minimum model EV %", 0.0, 10.0, 2.0, .5)
+    pregame_edge = st.slider("Minimum pregame model edge", .5, 2.0, .75, .25)
     min_edge = st.slider("Minimum live projection edge", .5, 2.5, 1.5, .5)
     max_price = st.slider("Worst acceptable Under odds", -130, -105, -115, 5)
-    st.caption("Ví dụ -115: bot PASS mọi Under -120, -125... dù tín hiệu mạnh.")
+    st.caption("Ví dụ -115: bot PASS giá -120/-125 cho cả UNDER lẫn OVER.")
     st.caption("Ít picks hơn, ưu tiên giá + EV. Không ép phải có bet.")
     st.divider()
     st.write("Odds API", "🟢 Connected" if ODDS_KEY else "🔴 Missing")
@@ -463,6 +484,8 @@ events = odds()
 if games is None:
     st.error("Không tải được MLB schedule.")
     st.stop()
+
+form = recent_team_form(day.isoformat())
 
 rows = []
 alert_candidates = []
@@ -478,18 +501,16 @@ for g in games:
     if s and s["is_live"]:
         a = analyze_live(m, s, mem, min_edge, live_threshold, min_ev, max_price)
     else:
-        a = analyze_pregame(
-            m, mem, pregame_threshold, min_ev, min_fair_prob, max_price
-        )
+        a = analyze_pregame(g, m, mem, form, pregame_threshold, min_ev, pregame_edge, max_price)
 
-    verified = a["pick"] == "UNDER"
+    verified = a["pick"] in {"UNDER","OVER"}
     row = {
         "Game": g["game"],
         "Mode": a["mode"],
-        "Best Bet": f"UNDER {m['total']}" if verified else "PASS",
-        "Best Under Odds": m["under"] if m["under"] is not None else "N/A",
-        "Book": m["book"],
-        "Fair Under %": a["fair_prob"] if a["fair_prob"] is not None else "N/A",
+        "Best Bet": f"{a['pick']} {m['total']}" if verified else "PASS",
+        "Best Odds": a.get("odds") if verified else "N/A",
+        "Book": a.get("book", m["book"]),
+        "Model Win %": a["fair_prob"] if a["fair_prob"] is not None else "N/A",
         "EV %": a["ev"] if a["ev"] is not None else "N/A",
         "Quality": a["quality"],
         "Projection": a["projection"] if a["projection"] is not None else "—",
@@ -504,6 +525,8 @@ for g in games:
 
     if verified:
         alert_candidates.append((g,m,s,mem,a))
+
+settle_history()
 
 verified_count = len(alert_candidates)
 pass_count = max(0, len(games)-verified_count)
@@ -523,7 +546,7 @@ with tabs[0]:
         st.success("Không có kèo nào đủ chuẩn V24 lúc này — PASS toàn bộ slate.")
     else:
         st.dataframe(
-            v[["Game","Mode","Best Bet","Best Under Odds","Book","Fair Under %",
+            v[["Game","Mode","Best Bet","Best Odds","Book","Model Win %",
                "EV %","Quality","Projection","Edge","Minimum Acceptable Line","Move"]],
             use_container_width=True, hide_index=True
         )
@@ -537,19 +560,24 @@ with tabs[2]:
         st.info("Chưa có dữ liệu.")
     else:
         st.dataframe(
-            df[["Game","Best Under Odds","Fair Under %","EV %","Quality",
+            df[["Game","Best Odds","Model Win %","EV %","Quality",
                 "Move","Books","Reason"]],
             use_container_width=True, hide_index=True
         )
     st.info(
-        "V24 không cộng điểm chỉ vì odds âm. Odds càng đắt càng khó VERIFIED. "
-        "Fair Under % được tính từ no-vig consensus của sportsbook tại cùng total."
+        "V24.1 tạo projection từ dữ liệu baseball trước. Sportsbook consensus không được dùng để chọn UNDER/OVER; odds chỉ dùng cho price/EV gate."
     )
 
 with tabs[3]:
     if LOG.exists():
         try:
             history = pd.read_csv(LOG)
+            settled = history[history["Result"].isin(["WIN","LOSS","PUSH"])] if "Result" in history else pd.DataFrame()
+            if not settled.empty:
+                risked = int((settled["Result"] != "PUSH").sum())
+                profit = pd.to_numeric(settled["Profit Units"], errors="coerce").fillna(0).sum()
+                roi = (profit/risked*100) if risked else 0
+                x1,x2,x3=st.columns(3); x1.metric("Settled",len(settled)); x2.metric("Profit",f"{profit:+.2f}u"); x3.metric("ROI",f"{roi:+.1f}%")
             st.dataframe(
                 history.sort_values("Timestamp", ascending=False),
                 use_container_width=True, hide_index=True
@@ -564,7 +592,7 @@ with tabs[3]:
         st.info("Chưa có Telegram alert nào từ V24.")
 
 # Send only once per game/mode/line using session state.
-sent = st.session_state.setdefault("sent_alerts_v24", set())
+sent = st.session_state.setdefault("sent_alerts_v241", set())
 for g,m,s,mem,a in alert_candidates:
     key = f"{g['pk']}|{a['mode']}|{m['total']}|{m['under']}"
     if key in sent:
@@ -573,11 +601,11 @@ for g,m,s,mem,a in alert_candidates:
     score = f"{s['ar']}-{s['hr']}" if s else ""
     inning = f"{s['half']} {s['inn']}" if s and s["is_live"] else "Pregame"
     text = (
-        f"⚾ MLB EDGE AI PRO V24\n"
+        f"⚾ MLB EDGE AI PRO V24.1\n"
         f"✅ VERIFIED {a['mode']}\n"
         f"{g['game']}\n"
-        f"🎯 UNDER {m['total']} @ {m['under']} ({m['book']})\n"
-        f"📊 Fair Under: {a['fair_prob']}%\n"
+        f"🎯 {a['pick']} {m['total']} @ {a.get('odds', m['under'])} ({a.get('book', m['book'])})\n"
+        f"📊 Model Win: {a['fair_prob']}%\n"
         f"💰 EV: {a['ev']}%\n"
         f"⭐ Quality: {a['quality']}/100\n"
         f"📉 Move: {a['move']}\n"
@@ -596,20 +624,19 @@ for g,m,s,mem,a in alert_candidates:
         record = {
             "Timestamp":datetime.now(TZ).isoformat(),
             "Date":day.isoformat(),"Game PK":g["pk"],"Game":g["game"],
-            "Mode":a["mode"],"Pick":"UNDER","Line":m["total"],"Odds":m["under"],
+            "Mode":a["mode"],"Pick":a["pick"],"Line":m["total"],"Odds":a.get("odds",m["under"]),
             "Quality":a["quality"],"Fair Under %":a["fair_prob"],"EV %":a["ev"],
             "Projection":a["projection"],"Edge":a["edge"],
             "Minimum Line":a["min_line"],
             "Opening":mem.get("opening") if mem else "",
             "Best Seen":mem.get("best") if mem else "",
-            "Score":score,"Inning":inning,"Book":m["book"],
+            "Score":score,"Inning":inning,"Book":a.get("book",m["book"]),
             "Result":"","Profit Units":""
         }
         log_alert(record)
 
 st.caption(
-    "v24 changes: no-vig fair probability + EV gate + price ceiling + unique Quality scores. "
-    "Pregame VERIFIED no longer shows fake Projection/Edge; live requires projection edge."
+    "v24.1: pregame direction comes from independent baseball projection; sportsbook is price validation only. Live remains conservative and UNDER-only."
 )
 st.caption("Updated " + datetime.now(TZ).strftime("%Y-%m-%d %I:%M:%S %p %Z"))
 
